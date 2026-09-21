@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-struct PageId(u64);
+pub struct PageId(u64);
 
 impl PageId {
     /// Returns new allocated `PageId` from provided Id.
