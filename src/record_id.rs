@@ -1,6 +1,5 @@
 use crate::page_id::PageId;
-
-pub type SlotId = u16;
+use crate::slotted_page::SlotId;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub struct RecordId {
@@ -28,8 +27,8 @@ impl RecordId {
 #[cfg(test)]
 mod record_id_tests {
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     fn make_record_id(page_id: u64, slot_id: u16) -> RecordId {
