@@ -1,7 +1,6 @@
 use std::fmt::Debug;
-use std::hash::Hash;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
 struct PageId(u64);
 
 impl PageId {
@@ -13,37 +12,6 @@ impl PageId {
     /// Returns the associated `PageId`
     pub fn get(&self) -> u64 {
         self.0
-    }
-}
-
-impl Debug for PageId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("PageId").field(&self.0).finish()
-    }
-}
-impl Eq for PageId {}
-
-impl PartialEq for PageId {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Ord for PageId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-impl PartialOrd for PageId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Hash for PageId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
     }
 }
 

@@ -1,3 +1,4 @@
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key {
     bytes: Vec<u8>,
 }
@@ -13,26 +14,6 @@ impl Key {
         &self.bytes
     }
 }
-
-impl PartialEq for Key {
-    fn eq(&self, other: &Self) -> bool {
-        self.bytes == other.bytes
-    }
-}
-
-impl Ord for Key {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.bytes.cmp(&other.bytes)
-    }
-}
-
-impl PartialOrd for Key {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for Key {}
 
 #[cfg(test)]
 mod keys_tests {
