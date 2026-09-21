@@ -2,16 +2,16 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 #[derive(Clone, Copy)]
-struct PageId(usize);
+struct PageId(u64);
 
 impl PageId {
     /// Returns new allocated `PageId` from provided Id.
-    pub fn new(id: usize) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(id)
     }
 
     /// Returns the associated `PageId`
-    pub fn get(&self) -> usize {
+    pub fn get(&self) -> u64 {
         self.0
     }
 }
@@ -69,9 +69,9 @@ mod page_id_tests {
 
     #[test]
     fn max_page_id_is_preserved() {
-        let page_id = PageId::new(usize::MAX);
+        let page_id = PageId::new(u64::MAX);
 
-        assert_eq!(page_id.get(), usize::MAX);
+        assert_eq!(page_id.get(), u64::MAX);
     }
 
     #[test]
@@ -105,7 +105,7 @@ mod page_id_tests {
             PageId::new(0),
             PageId::new(1),
             PageId::new(42),
-            PageId::new(usize::MAX),
+            PageId::new(u64::MAX),
         ];
 
         for a in &ids {
