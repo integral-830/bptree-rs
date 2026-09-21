@@ -35,7 +35,7 @@ impl PartialOrd for Key {
 impl Eq for Key {}
 
 #[cfg(test)]
-mod tests {
+mod keys_tests {
     use super::*;
     use std::cmp::Ordering;
 
