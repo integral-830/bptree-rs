@@ -1,4 +1,6 @@
+use crate::error::BPlusTreeError;
 use crate::page_id::PageId;
+use crate::utilities::has_duplicates;
 use crate::{key::Key, record_id::RecordId};
 
 pub enum BPlusNode {
@@ -11,6 +13,65 @@ pub enum BPlusNode {
         keys: Vec<Key>,
         children: Vec<PageId>,
     },
+}
+
+impl BPlusNode {
+    pub fn validate(&self, page_id: PageId) -> Result<(), BPlusTreeError> {
+        match self {
+            BPlusNode::Leaf {
+                keys,
+                values,
+                next_leaf,
+            } => {
+                if keys.len() != values.len() {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys and Values length mismatch."),
+                    });
+                }
+                if !keys.is_sorted() {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys aren't sorted."),
+                    });
+                }
+                if has_duplicates(keys) {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys must be unique."),
+                    });
+                }
+                Ok(())
+            }
+            BPlusNode::Internal { keys, children } => {
+                if children.len() != keys.len().checked_add(1).unwrap_or(0) {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys and Children length mismatch."),
+                    });
+                }
+                if !keys.is_sorted() {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys aren't sorted."),
+                    });
+                }
+                if has_duplicates(keys) {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Keys must be unique."),
+                    });
+                }
+                if children.is_empty() {
+                    return Err(BPlusTreeError::CorruptNode {
+                        page_id,
+                        reason: String::from("Atleast one child is required."),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +247,183 @@ mod node_tests {
 
         assert!(matches!(leaf, BPlusNode::Leaf { .. }));
         assert!(matches!(internal, BPlusNode::Internal { .. }));
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use crate::error::BPlusTreeError;
+    use crate::key::Key;
+    use crate::page_id::PageId;
+    use crate::record_id::RecordId;
+    use crate::BPlusNode;
+
+    fn key(bytes: &[u8]) -> Key {
+        Key::new(bytes.to_vec())
+    }
+
+    fn page_id() -> PageId {
+        PageId::new(7)
+    }
+
+    fn record_id(slot: u16) -> RecordId {
+        RecordId::new(PageId::new(100), slot)
+    }
+
+    fn assert_corrupt_node(result: Result<(), BPlusTreeError>, expected_page_id: PageId) {
+        match result {
+            Err(BPlusTreeError::CorruptNode { page_id, reason: _ }) => {
+                assert_eq!(page_id, expected_page_id);
+            }
+            other => panic!("expected CorruptNode error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_empty_leaf_passes_validation() {
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        assert!(node.validate(page_id()).is_ok());
+    }
+
+    #[test]
+    fn valid_leaf_with_sorted_keys_passes_validation() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"b"), key(b"c")],
+            values: vec![record_id(0), record_id(1), record_id(2)],
+            next_leaf: None,
+        };
+
+        assert!(node.validate(page_id()).is_ok());
+    }
+
+    #[test]
+    fn valid_leaf_with_next_leaf_passes_validation() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a")],
+            values: vec![record_id(0)],
+            next_leaf: Some(PageId::new(8)),
+        };
+
+        assert!(node.validate(page_id()).is_ok());
+    }
+
+    #[test]
+    fn leaf_with_mismatched_key_value_counts_is_rejected() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"b")],
+            values: vec![record_id(0)],
+            next_leaf: None,
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn leaf_with_unsorted_keys_is_rejected() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"b"), key(b"a")],
+            values: vec![record_id(0), record_id(1)],
+            next_leaf: None,
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn leaf_with_duplicate_keys_is_rejected() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"a")],
+            values: vec![record_id(0), record_id(1)],
+            next_leaf: None,
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn valid_zero_key_internal_node_with_one_child_passes() {
+        let node = BPlusNode::Internal {
+            keys: vec![],
+            children: vec![PageId::new(10)],
+        };
+
+        assert!(node.validate(page_id()).is_ok());
+    }
+
+    #[test]
+    fn valid_internal_node_passes_validation() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"m"), key(b"t")],
+            children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
+        };
+
+        assert!(node.validate(page_id()).is_ok());
+    }
+
+    #[test]
+    fn internal_node_with_no_children_is_rejected() {
+        let node = BPlusNode::Internal {
+            keys: vec![],
+            children: vec![],
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn internal_node_with_too_few_children_is_rejected() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"m"), key(b"t")],
+            children: vec![PageId::new(10), PageId::new(20)],
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn internal_node_with_too_many_children_is_rejected() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"m")],
+            children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn internal_node_with_unsorted_keys_is_rejected() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"t"), key(b"m")],
+            children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn internal_node_with_duplicate_keys_is_rejected() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"m"), key(b"m")],
+            children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
+        };
+
+        assert_corrupt_node(node.validate(page_id()), page_id());
+    }
+
+    #[test]
+    fn validation_error_contains_the_supplied_page_id() {
+        let node = BPlusNode::Internal {
+            keys: vec![],
+            children: vec![],
+        };
+
+        let expected_page_id = PageId::new(123);
+
+        assert_corrupt_node(node.validate(expected_page_id), expected_page_id);
     }
 }

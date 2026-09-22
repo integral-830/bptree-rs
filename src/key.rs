@@ -1,4 +1,4 @@
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug, Hash)]
 pub struct Key {
     bytes: Vec<u8>,
 }

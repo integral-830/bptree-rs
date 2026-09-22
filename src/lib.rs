@@ -5,3 +5,4 @@ pub mod page_id;
 pub mod record_id;
 pub mod slotted_page;
 pub use node::BPlusNode;
+pub mod utilities;
