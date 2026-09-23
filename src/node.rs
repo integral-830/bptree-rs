@@ -4,6 +4,7 @@ use crate::page_id::PageId;
 use crate::utilities::has_duplicates;
 use crate::{key::Key, record_id::RecordId};
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum BPlusNode {
     Leaf {
         keys: Vec<Key>,
@@ -351,11 +352,11 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
-    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
+    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())

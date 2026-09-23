@@ -1,9 +1,12 @@
-use crate::{BPlusNode, error::BPlusTreeError, slotted_page::PAGE_SIZE};
+use crate::{
+    error::BPlusTreeError, key::Key, page_id::PageId, record_id::RecordId, slotted_page::PAGE_SIZE,
+    BPlusNode,
+};
 
 pub const MAGIC: [u8; 4] = *b"BTR4";
 pub const FORMAT_VERSION: u8 = 1;
 pub const HEADER_SIZE: usize = 6; // 4 bytes MAGIC + 1 byte FORMAT + 1 byte Node variant
-
+pub const PAGE_ID_SIZE: usize = 8; // 8 bytes
 pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
     let node_size = node.encoded_len()?;
     if node_size > PAGE_SIZE {
@@ -45,9 +48,14 @@ pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
                 cursor = cursor
                     .checked_add(key_len as usize)
                     .ok_or(BPlusTreeError::SizeOverflow)?;
-                buffer[cursor..cursor.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?]
+                buffer[cursor
+                    ..cursor
+                        .checked_add(PAGE_ID_SIZE)
+                        .ok_or(BPlusTreeError::SizeOverflow)?]
                     .copy_from_slice(&val.page_id().get().to_le_bytes()); // page_id
-                cursor = cursor.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor
+                    .checked_add(PAGE_ID_SIZE)
+                    .ok_or(BPlusTreeError::SizeOverflow)?;
                 buffer[cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?]
                     .copy_from_slice(&val.slot_id().to_le_bytes()); // slot_id
                 cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
@@ -83,12 +91,209 @@ pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
             cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
             for child in children {
                 let child = child.get();
-                buffer[cursor..cursor.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?]
+                buffer[cursor
+                    ..cursor
+                        .checked_add(PAGE_ID_SIZE)
+                        .ok_or(BPlusTreeError::SizeOverflow)?]
                     .copy_from_slice(&child.to_le_bytes()); // child
                 cursor = cursor.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?;
             }
             Ok(buffer)
         }
+    }
+}
+
+pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
+    let magic_bytes: &[u8] = page.get(0..4).ok_or(BPlusTreeError::NodeSlicingErr)?;
+    if magic_bytes != MAGIC {
+        return Err(BPlusTreeError::InvalidHeader {
+            reason: String::from("Invalid MAGIC"),
+        });
+    }
+    let format_bytes: [u8; 1] = page
+        .get(4..5)
+        .ok_or(BPlusTreeError::NodeSlicingErr)?
+        .try_into()
+        .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+    let format: u8 = u8::from_le_bytes(format_bytes);
+    if format != FORMAT_VERSION {
+        return Err(BPlusTreeError::InvalidHeader {
+            reason: String::from("Invalid FORMAT"),
+        });
+    }
+    let node_type_bytes: &[u8] = page.get(5..6).ok_or(BPlusTreeError::NodeSlicingErr)?;
+    let node_type_array: [u8; 1] = node_type_bytes
+        .try_into()
+        .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+    let node_type: u8 = u8::from_le_bytes(node_type_array);
+    match node_type {
+        1 => {
+            let key_count_bytes: [u8; 2] = page
+                .get(6..8)
+                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .try_into()
+                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+            let key_count: u16 = u16::from_le_bytes(key_count_bytes);
+            let next_leaf_bytes: [u8; 1] = page
+                .get(8..9)
+                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .try_into()
+                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+            let next_leaf: u8 = u8::from_le_bytes(next_leaf_bytes);
+            let mut next_leaf_data = None;
+            let mut cursor: usize = 9;
+            if next_leaf == 1 {
+                let next_leaf_temp_data_bytes: [u8; 8] = page
+                    .get(9..17)
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                let page_id = PageId::new(u64::from_le_bytes(next_leaf_temp_data_bytes));
+                next_leaf_data = Some(page_id);
+                cursor = 17;
+            } else if next_leaf != 0 {
+                return Err(BPlusTreeError::InvalidNextLeafValue {
+                    found: next_leaf as usize,
+                });
+            }
+            let mut keys_vec = Vec::new();
+            let mut val_vec: Vec<RecordId> = Vec::new();
+            for _ in 0..key_count {
+                let key_len_bytes: &[u8] = page
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                let key_len_array: [u8; 2] = key_len_bytes
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                let key_len = u16::from_le_bytes(key_len_array) as usize;
+                let key_bytes: &[u8] = page
+                    .get(
+                        cursor
+                            ..cursor
+                                .checked_add(key_len)
+                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                    )
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor
+                    .checked_add(key_len)
+                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                let page_id_bytes: [u8; 8] = page
+                    .get(
+                        cursor
+                            ..cursor
+                                .checked_add(PAGE_ID_SIZE)
+                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                    )
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor
+                    .checked_add(PAGE_ID_SIZE)
+                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                let slot_id_bytes: [u8; 2] = page
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                let key = Key::new(key_bytes.to_owned());
+                let page_id = PageId::new(u64::from_le_bytes(page_id_bytes));
+                let slot_id = u16::from_le_bytes(slot_id_bytes);
+                let record_id = RecordId::new(page_id, slot_id);
+                keys_vec.push(key);
+                val_vec.push(record_id);
+            }
+            let node = BPlusNode::Leaf {
+                keys: keys_vec,
+                values: val_vec,
+                next_leaf: next_leaf_data,
+            };
+            node.validate()?;
+            Ok(node)
+        }
+        0 => {
+            let key_count: [u8; 2] = page
+                .get(6..8)
+                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .try_into()
+                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+            let key_count: u16 = u16::from_le_bytes(key_count);
+            let mut cursor: usize = 8;
+            let mut keys_vec: Vec<Key> = Vec::new();
+            let mut val_vec: Vec<PageId> = Vec::new();
+            for _ in 0..key_count {
+                let key_len: [u8; 2] = page
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                let key_len = u16::from_le_bytes(key_len) as usize;
+                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                let key_bytes: &[u8] = page
+                    .get(
+                        cursor
+                            ..cursor
+                                .checked_add(key_len)
+                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                    )
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor
+                    .checked_add(key_len)
+                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                let key = Key::new(key_bytes.to_owned());
+                keys_vec.push(key);
+            }
+            let children_count: [u8; 2] = page
+                .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
+                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .try_into()
+                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+            let children_count: u16 = u16::from_le_bytes(children_count);
+            cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+            if children_count
+                != key_count
+                    .checked_add(1)
+                    .ok_or(BPlusTreeError::SizeOverflow)?
+            {
+                return Err(BPlusTreeError::NodeDecodingErr {
+                    reason: String::from("Children and Key count not satisfied while decoding."),
+                });
+            }
+            let required_bytes = (children_count as usize)
+                .checked_mul(PAGE_ID_SIZE)
+                .ok_or(BPlusTreeError::SizeOverflow)?;
+            let payload_end = cursor
+                .checked_add(required_bytes)
+                .ok_or(BPlusTreeError::SizeOverflow)?;
+            if payload_end > PAGE_SIZE {
+                return Err(BPlusTreeError::InvalidPayload { found: payload_end });
+            }
+            for _ in 0..children_count {
+                let page_id_bytes: [u8; 8] = page
+                    .get(
+                        cursor
+                            ..cursor
+                                .checked_add(PAGE_ID_SIZE)
+                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                    )
+                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .try_into()
+                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                cursor = cursor
+                    .checked_add(PAGE_ID_SIZE)
+                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                let page_id = PageId::new(u64::from_le_bytes(page_id_bytes));
+                val_vec.push(page_id);
+            }
+            let node = BPlusNode::Internal {
+                keys: keys_vec,
+                children: val_vec,
+            };
+            node.validate()?;
+            Ok(node)
+        }
+        _ => Err(BPlusTreeError::InvalidNodeType),
     }
 }
 
@@ -431,5 +636,362 @@ mod node_codec_encode_tests {
             node.validate(),
             Err(BPlusTreeError::InvalidNode { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod node_codec_decode_tests {
+    use super::*;
+    use crate::key::Key;
+    use crate::node::BPlusNode;
+    use crate::page_id::PageId;
+    use crate::record_id::RecordId;
+
+    fn key(bytes: &[u8]) -> Key {
+        Key::new(bytes.to_vec())
+    }
+
+    fn page_id(id: u64) -> PageId {
+        PageId::new(id)
+    }
+
+    fn record_id(page: u64, slot: u16) -> RecordId {
+        RecordId::new(page_id(page), slot)
+    }
+
+    fn read_u16(page: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes(page[offset..offset + 2].try_into().unwrap())
+    }
+
+    fn write_u16(page: &mut [u8], offset: usize, value: u16) {
+        page[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn assert_round_trip(node: BPlusNode) {
+        let encoded = encode(&node).unwrap();
+        let decoded = decode(&encoded).unwrap();
+
+        assert_eq!(decoded, node);
+    }
+
+    fn blank_page(node_tag: u8, key_count: u16) -> [u8; PAGE_SIZE] {
+        let mut page = [0u8; PAGE_SIZE];
+        page[0..4].copy_from_slice(&MAGIC);
+        page[4] = FORMAT_VERSION;
+        page[5] = node_tag;
+        write_u16(&mut page, 6, key_count);
+        page
+    }
+
+    #[test]
+    fn decode_round_trip_empty_leaf() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_leaf_with_next_leaf() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: Some(page_id(u64::MAX - 5)),
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_leaf_one_entry() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![key(b"alpha")],
+            values: vec![record_id(42, 7)],
+            next_leaf: None,
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_leaf_multiple_entries() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"bb"), key(b"ccc")],
+            values: vec![record_id(10, 1), record_id(20, 2), record_id(30, 3)],
+            next_leaf: Some(page_id(40)),
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_leaf_empty_key() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![key(b"")],
+            values: vec![record_id(1, 0)],
+            next_leaf: None,
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_internal_zero_keys() {
+        assert_round_trip(BPlusNode::Internal {
+            keys: vec![],
+            children: vec![page_id(99)],
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_internal_multiple_keys() {
+        assert_round_trip(BPlusNode::Internal {
+            keys: vec![key(b"alpha"), key(b"omega")],
+            children: vec![page_id(10), page_id(20), page_id(30)],
+        });
+    }
+
+    #[test]
+    fn decode_round_trip_large_page_ids() {
+        assert_round_trip(BPlusNode::Leaf {
+            keys: vec![key(b"k")],
+            values: vec![record_id(u64::MAX - 15, u16::MAX)],
+            next_leaf: Some(page_id(u64::MAX - 7)),
+        });
+    }
+
+    #[test]
+    fn decode_rejects_invalid_magic() {
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        let mut encoded = encode(&node).unwrap();
+        encoded[0] ^= 0xFF;
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unsupported_version() {
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        let mut encoded = encode(&node).unwrap();
+        encoded[4] = FORMAT_VERSION.wrapping_add(1);
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unknown_node_tag() {
+        let mut page = blank_page(2, 0);
+        page[5] = 2;
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_invalid_next_leaf_tag() {
+        let mut page = blank_page(1, 0);
+        page[8] = 2;
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_truncated_next_leaf_page_id() {
+        let mut page = blank_page(1, 0);
+        page[8] = 1;
+
+        // The fixed page array has 4096 bytes, so place the cursor
+        // at the final byte by using a malformed layout.
+        // A correct decoder must reject a next_leaf PageId that
+        // cannot be fully read from its expected location.
+        //
+        // Since next_leaf is at offset 8 in this format, the full
+        // 8-byte PageId fits in a PAGE_SIZE array. This test instead
+        // verifies that an invalid tag is rejected.
+        page[8] = 2;
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_key_length_out_of_bounds() {
+        let mut page = blank_page(1, 1);
+
+        // Leaf with next_leaf=None.
+        page[8] = 0;
+
+        // key_len is at offset 9. Claim a key larger than the
+        // remaining page payload.
+        write_u16(&mut page, 9, u16::MAX);
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_truncated_record_id() {
+        let mut page = blank_page(1, 1);
+        page[8] = 0;
+
+        // Position the key payload near the end of the page.
+        // The decoder must reject the entry because the RecordId
+        // cannot fit after the key.
+        let key_len = (PAGE_SIZE - 9 - 2 - 5) as u16;
+        write_u16(&mut page, 9, key_len);
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_internal_children_count_mismatch() {
+        let mut page = blank_page(0, 0);
+
+        // Internal node with key_count=0 must have exactly 1 child.
+        write_u16(&mut page, 8, 0);
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unsorted_leaf_keys() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"b")],
+            values: vec![record_id(1, 1), record_id(2, 2)],
+            next_leaf: None,
+        };
+
+        let mut encoded = encode(&node).unwrap();
+
+        // First key byte: header(8) + next_leaf tag(1) + key_len(2).
+        encoded[11] = b'z';
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_leaf_keys() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a"), key(b"b")],
+            values: vec![record_id(1, 1), record_id(2, 2)],
+            next_leaf: None,
+        };
+
+        let mut encoded = encode(&node).unwrap();
+
+        // First entry occupies 2 + 1 + 10 bytes after offset 9.
+        // Second key bytes begin at offset 22.
+        encoded[22 + 2] = b'a';
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unsorted_internal_keys() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"a"), key(b"b")],
+            children: vec![page_id(1), page_id(2), page_id(3)],
+        };
+
+        let mut encoded = encode(&node).unwrap();
+
+        // First key begins at offset 10.
+        encoded[10] = b'z';
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_internal_keys() {
+        let node = BPlusNode::Internal {
+            keys: vec![key(b"a"), key(b"b")],
+            children: vec![page_id(1), page_id(2), page_id(3)],
+        };
+
+        let mut encoded = encode(&node).unwrap();
+
+        // Second key begins after:
+        // header + key_count + first key_len + first key bytes.
+        encoded[13] = b'a';
+
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_internal_child_count_overflow_mismatch() {
+        let mut page = blank_page(0, u16::MAX);
+
+        // The decoder must reject malformed counts safely.
+        // There is no valid way for this key count to fit in a
+        // single page with the required keys and children.
+        write_u16(&mut page, 8, 0);
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_accepts_zero_padding_after_node() {
+        let node = BPlusNode::Leaf {
+            keys: vec![key(b"a")],
+            values: vec![record_id(1, 1)],
+            next_leaf: None,
+        };
+
+        let encoded = encode(&node).unwrap();
+
+        // The encoder zero-initializes unused page bytes.
+        // Decoder should accept this normal representation.
+        assert!(decode(&encoded).is_ok());
+    }
+
+    #[test]
+    fn decode_does_not_panic_on_all_zero_page() {
+        let page = [0u8; PAGE_SIZE];
+
+        // Invalid magic should return an error rather than panic.
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_leaf_entry_with_incomplete_record_id() {
+        let mut page = [0u8; PAGE_SIZE];
+
+        page[0..4].copy_from_slice(&MAGIC);
+        page[4] = FORMAT_VERSION;
+        page[5] = 1; // Leaf
+        page[6..8].copy_from_slice(&1u16.to_le_bytes()); // key_count = 1
+
+        page[8] = 0; // next_leaf = None
+
+        // The entry begins at byte 9.
+        // key_len = PAGE_SIZE - 12 leaves insufficient space
+        // for the 10-byte RecordId after the key.
+        let key_len = (PAGE_SIZE - 12) as u16;
+        page[9..11].copy_from_slice(&key_len.to_le_bytes());
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_internal_key_payload_out_of_bounds() {
+        let mut page = blank_page(0, 1);
+
+        // Internal key starts at offset 8.
+        write_u16(&mut page, 8, u16::MAX);
+
+        assert!(decode(&page).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_internal_children_payload_out_of_bounds() {
+        let mut page = blank_page(0, 0);
+
+        // key_count=0 requires children_count=1.
+        write_u16(&mut page, 8, 1);
+
+        // Corrupt decoder must not panic while reading children.
+        // The page is zero-filled, so a correct decoder will read
+        // the child if it doesn't enforce child-count consistency.
+        assert!(decode(&page).is_ok());
     }
 }

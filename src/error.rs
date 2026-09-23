@@ -28,6 +28,24 @@ pub enum BPlusTreeError {
     /// Size overflowed error variant
     #[error("Size overflowed")]
     SizeOverflow,
+    ///Invalid Magic err variant
+    #[error("Invalid file header: {reason}")]
+    InvalidHeader { reason: String },
+    /// enum variant for node encoding err
+    #[error(" Decoding Node failed reason: {reason}")]
+    NodeDecodingErr { reason: String },
+    /// enum variant for node encoding err
+    #[error(" Node slicing failed ")]
+    NodeSlicingErr,
+    /// enum variant for node encoding err
+    #[error(" Invalid Node type accepted:(0 or 1)")]
+    InvalidNodeType,
+    /// Invalid `next_leaf_value` err variant
+    #[error(" Invalid next_leaf_value value expected: (0 or 1) found: {found}")]
+    InvalidNextLeafValue { found: usize },
+    /// Invalid payload err variant
+    #[error(" Invalid payload length expected: 4096 found: {found}")]
+    InvalidPayload { found: usize },
 }
 
 #[cfg(test)]
