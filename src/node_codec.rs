@@ -1,6 +1,6 @@
 use crate::{
-    error::BPlusTreeError, key::Key, page_id::PageId, record_id::RecordId, slotted_page::PAGE_SIZE,
-    BPlusNode,
+    BPlusNode, error::BPlusTreeError, key::Key, page_id::PageId, record_id::RecordId,
+    slotted_page::PAGE_SIZE,
 };
 
 pub const MAGIC: [u8; 4] = *b"BTR4";
@@ -993,5 +993,62 @@ mod node_codec_decode_tests {
         // The page is zero-filled, so a correct decoder will read
         // the child if it doesn't enforce child-count consistency.
         assert!(decode(&page).is_ok());
+    }
+
+    #[test]
+    fn node_codec_round_trip_preserves_full_node_invariants() {
+        let test_nodes = vec![
+            BPlusNode::Leaf {
+                keys: vec![],
+                values: vec![],
+                next_leaf: None,
+            },
+            BPlusNode::Leaf {
+                keys: vec![
+                    Key::new(vec![]),
+                    Key::new(b"alpha".to_vec()),
+                    Key::new(b"beta".to_vec()),
+                ],
+                values: vec![
+                    RecordId::new(PageId::new(u64::MAX), u16::MAX),
+                    RecordId::new(PageId::new(42), 7),
+                    RecordId::new(PageId::new(100), 9),
+                ],
+                next_leaf: Some(PageId::new(u64::MAX)),
+            },
+            BPlusNode::Internal {
+                keys: vec![],
+                children: vec![PageId::new(u64::MAX)],
+            },
+            BPlusNode::Internal {
+                keys: vec![
+                    Key::new(b"alpha".to_vec()),
+                    Key::new(b"beta".to_vec()),
+                    Key::new(b"gamma".to_vec()),
+                ],
+                children: vec![
+                    PageId::new(0),
+                    PageId::new(1),
+                    PageId::new(2),
+                    PageId::new(u64::MAX),
+                ],
+            },
+        ];
+
+        for original in test_nodes {
+            original.validate().unwrap();
+
+            let encoded = encode(&original).unwrap();
+            let decoded = decode(&encoded).unwrap();
+
+            assert_eq!(decoded, original);
+
+            decoded.validate().unwrap();
+
+            assert_eq!(
+                decoded.encoded_len().unwrap(),
+                original.encoded_len().unwrap()
+            );
+        }
     }
 }
