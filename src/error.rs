@@ -1,3 +1,5 @@
+use std::num::TryFromIntError;
+
 use thiserror::Error;
 
 use crate::page_id::PageId;
@@ -8,9 +10,24 @@ pub enum BPlusTreeError {
     /// enum variant invalid Configuration error
     #[error("Invalid Configuration reason: {reason}")]
     InvalidConfiguration { reason: String },
-    /// enum variant for node corruption
+    /// enum variant for node validation while `node_decoding`
     #[error("Node {page_id:?} is corrupted reason: {reason}")]
     CorruptNode { page_id: PageId, reason: String },
+    /// enum variant for node validation while `node_encoding`
+    #[error("Node is invalid reason: {reason}")]
+    InvalidNode { reason: String },
+    /// enum variant for node validation while `node_encoding`
+    #[error("Node is invalid reason: {reason}")]
+    NodeTooLarge { reason: String },
+    /// enum variant for node encoding err
+    #[error(" Encoding Node {page_id:?} failed reason: {reason}")]
+    NodeEncodingErr { page_id: PageId, reason: String },
+    /// Index conversion error variant
+    #[error("Index bounds overflowed: {0}")]
+    IndexOverflow(#[from] TryFromIntError),
+    /// Size overflowed error variant
+    #[error("Size overflowed")]
+    SizeOverflow,
 }
 
 #[cfg(test)]

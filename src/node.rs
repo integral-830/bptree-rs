@@ -1,4 +1,5 @@
 use crate::error::BPlusTreeError;
+use crate::node_codec::HEADER_SIZE;
 use crate::page_id::PageId;
 use crate::utilities::has_duplicates;
 use crate::{key::Key, record_id::RecordId};
@@ -16,12 +17,12 @@ pub enum BPlusNode {
 }
 
 impl BPlusNode {
-    pub fn validate(&self, page_id: PageId) -> Result<(), BPlusTreeError> {
+    pub fn validate_with_page_id(&self, page_id: PageId) -> Result<(), BPlusTreeError> {
         match self {
             BPlusNode::Leaf {
                 keys,
                 values,
-                next_leaf,
+                next_leaf: _,
             } => {
                 if keys.len() != values.len() {
                     return Err(BPlusTreeError::CorruptNode {
@@ -69,6 +70,104 @@ impl BPlusNode {
                     });
                 }
                 Ok(())
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), BPlusTreeError> {
+        match self {
+            BPlusNode::Leaf {
+                keys,
+                values,
+                next_leaf: _,
+            } => {
+                if keys.len() != values.len() {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys and Values length mismatch."),
+                    });
+                }
+                if !keys.is_sorted() {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys aren't sorted."),
+                    });
+                }
+                if has_duplicates(keys) {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys must be unique."),
+                    });
+                }
+                Ok(())
+            }
+            BPlusNode::Internal { keys, children } => {
+                if children.len() != keys.len().checked_add(1).unwrap_or(0) {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys and Children length mismatch."),
+                    });
+                }
+                if !keys.is_sorted() {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys aren't sorted."),
+                    });
+                }
+                if has_duplicates(keys) {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Keys must be unique."),
+                    });
+                }
+                if children.is_empty() {
+                    return Err(BPlusTreeError::InvalidNode {
+                        reason: String::from("Atleast one child is required."),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+    pub fn encoded_len(&self) -> Result<usize, BPlusTreeError> {
+        self.validate()?;
+        let mut len = 0usize;
+        len = len
+            .checked_add(HEADER_SIZE)
+            .ok_or(BPlusTreeError::SizeOverflow)?; // 4 bytes MAGIC + 1 byte FORMAT + 1 byte Node variant
+
+        match self {
+            BPlusNode::Leaf {
+                keys,
+                values: _,
+                next_leaf,
+            } => {
+                if next_leaf.is_some() {
+                    len = len.checked_add(9).ok_or(BPlusTreeError::SizeOverflow)?;
+                // next_leaf with it's data PageId
+                } else {
+                    len = len.checked_add(1).ok_or(BPlusTreeError::SizeOverflow)?;
+                    // next_leaf
+                }
+                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_count
+                for i in keys {
+                    len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_len
+                    len = len
+                        .checked_add(i.as_bytes().len())
+                        .ok_or(BPlusTreeError::SizeOverflow)?; // key_bytes
+                    len = len.checked_add(10).ok_or(BPlusTreeError::SizeOverflow)?;
+                    // record
+                }
+                Ok(len)
+            }
+            BPlusNode::Internal { keys, children } => {
+                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_count
+                for i in keys {
+                    len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_len
+                    len = len
+                        .checked_add(i.as_bytes().len())
+                        .ok_or(BPlusTreeError::SizeOverflow)?; // key_bytes
+                }
+                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; //children_count
+                for _ in children {
+                    len = len.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?;
+                    //children_bytes
+                }
+                Ok(len)
             }
         }
     }
@@ -252,11 +351,11 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
+    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
-    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())
@@ -287,7 +386,7 @@ mod validation_tests {
             next_leaf: None,
         };
 
-        assert!(node.validate(page_id()).is_ok());
+        assert!(node.validate().is_ok());
     }
 
     #[test]
@@ -298,7 +397,7 @@ mod validation_tests {
             next_leaf: None,
         };
 
-        assert!(node.validate(page_id()).is_ok());
+        assert!(node.validate().is_ok());
     }
 
     #[test]
@@ -309,7 +408,7 @@ mod validation_tests {
             next_leaf: Some(PageId::new(8)),
         };
 
-        assert!(node.validate(page_id()).is_ok());
+        assert!(node.validate().is_ok());
     }
 
     #[test]
@@ -320,7 +419,7 @@ mod validation_tests {
             next_leaf: None,
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -331,7 +430,7 @@ mod validation_tests {
             next_leaf: None,
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -342,7 +441,7 @@ mod validation_tests {
             next_leaf: None,
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -352,7 +451,7 @@ mod validation_tests {
             children: vec![PageId::new(10)],
         };
 
-        assert!(node.validate(page_id()).is_ok());
+        assert!(node.validate().is_ok());
     }
 
     #[test]
@@ -362,7 +461,7 @@ mod validation_tests {
             children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
         };
 
-        assert!(node.validate(page_id()).is_ok());
+        assert!(node.validate().is_ok());
     }
 
     #[test]
@@ -372,7 +471,7 @@ mod validation_tests {
             children: vec![],
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -382,7 +481,7 @@ mod validation_tests {
             children: vec![PageId::new(10), PageId::new(20)],
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -392,7 +491,7 @@ mod validation_tests {
             children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -402,7 +501,7 @@ mod validation_tests {
             children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -412,7 +511,7 @@ mod validation_tests {
             children: vec![PageId::new(10), PageId::new(20), PageId::new(30)],
         };
 
-        assert_corrupt_node(node.validate(page_id()), page_id());
+        assert_corrupt_node(node.validate_with_page_id(page_id()), page_id());
     }
 
     #[test]
@@ -424,6 +523,9 @@ mod validation_tests {
 
         let expected_page_id = PageId::new(123);
 
-        assert_corrupt_node(node.validate(expected_page_id), expected_page_id);
+        assert_corrupt_node(
+            node.validate_with_page_id(expected_page_id),
+            expected_page_id,
+        );
     }
 }
