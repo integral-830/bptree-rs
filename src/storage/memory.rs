@@ -77,7 +77,7 @@ impl NodeStore for MemoryNodeStore {
 }
 
 #[cfg(test)]
-mod memory_node_store_tests {
+pub mod memory_node_store_tests {
     use super::*;
     use crate::key::Key;
     use crate::page_id::PageId;
