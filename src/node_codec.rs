@@ -1,6 +1,6 @@
 use crate::{
-    error::BPlusNodeError, key::Key, page_id::PageId, record_id::RecordId, slotted_page::PAGE_SIZE,
-    BPlusNode,
+    BPlusNode, error::BPlusNodeError, key::Key, page_id::PageId, record_id::RecordId,
+    slotted_page::PAGE_SIZE,
 };
 
 pub const MAGIC: [u8; 4] = *b"BTR4";

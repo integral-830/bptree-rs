@@ -57,6 +57,10 @@ pub enum BPlusTreeError<E> {
     Node(BPlusNodeError),
     #[error("invalid tree state: {0}")]
     InvalidTreeState(&'static str),
+    #[error("duplicate key")]
+    DuplicateKey,
+    #[error("leaf node is full")]
+    LeafFull,
 }
 
 #[cfg(test)]

@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
+use crate::BPlusNode;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
-use crate::BPlusNode;
 
 pub struct MemoryNodeStore {
     tree: BTreeMap<PageId, BPlusNode>,
@@ -273,9 +273,11 @@ pub mod memory_node_store_tests {
 
         let page_id = store.allocate_node(&original).unwrap();
 
-        assert!(store
-            .write_node(PageId::new(500), &internal_node())
-            .is_err());
+        assert!(
+            store
+                .write_node(PageId::new(500), &internal_node())
+                .is_err()
+        );
         assert_eq!(store.read_node(page_id).unwrap(), original);
     }
 

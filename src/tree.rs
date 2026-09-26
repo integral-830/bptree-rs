@@ -3,6 +3,7 @@ use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
+use crate::slotted_page::PAGE_SIZE;
 use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
@@ -114,6 +115,50 @@ impl<S: NodeStore> BPlusTree<S> {
             }
         }
     }
+    pub fn insert(
+        &mut self,
+        key: Key,
+        record_id: RecordId,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let (page_id, node) = self.find_leaf(&key)?;
+
+        let BPlusNode::Leaf {
+            mut keys,
+            mut values,
+            next_leaf,
+        } = node
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "find_leaf returned an internal node",
+            ));
+        };
+
+        let insert_index = keys.partition_point(|existing_key| existing_key < &key);
+
+        if keys
+            .get(insert_index)
+            .is_some_and(|existing_key| existing_key == &key)
+        {
+            return Err(BPlusTreeError::DuplicateKey);
+        }
+
+        keys.insert(insert_index, key);
+        values.insert(insert_index, record_id);
+
+        let updated_leaf = BPlusNode::Leaf {
+            keys,
+            values,
+            next_leaf,
+        };
+
+        if updated_leaf.encoded_len().map_err(BPlusTreeError::Node)? > PAGE_SIZE {
+            return Err(BPlusTreeError::LeafFull);
+        }
+
+        self.store.write_node(page_id, &updated_leaf)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +173,7 @@ impl<S: NodeStore> BPlusTree<S> {
 
 #[cfg(test)]
 pub mod tree_tests {
+    use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
     use crate::page_id::PageId;
@@ -976,5 +1022,326 @@ pub mod tree_tests {
         let (page_id, _) = tree.find_leaf(&key("f")).unwrap();
 
         assert_eq!(page_id, leaf3_id);
+    }
+
+    #[test]
+    fn insert_into_empty_leaf() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key = key("a");
+        let record_id = record(1, 0);
+
+        tree.insert(key.clone(), record_id).unwrap();
+
+        assert_eq!(tree.search(&key).unwrap(), Some(record_id));
+
+        let result = tree.scan().unwrap();
+
+        assert_eq!(result, vec![(key, record_id)]);
+    }
+
+    #[test]
+    fn insert_at_beginning() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("b"), key("c")],
+            values: vec![record(1, 1), record(1, 2)],
+            next_leaf: None,
+        };
+
+        let root_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, root_id);
+
+        tree.insert(key("a"), record(1, 0)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_in_middle() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("a"), key("c")],
+            values: vec![record(1, 0), record(1, 2)],
+            next_leaf: None,
+        };
+
+        let root_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, root_id);
+
+        tree.insert(key("b"), record(1, 1)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_at_end() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("a"), key("b")],
+            values: vec![record(1, 0), record(1, 1)],
+            next_leaf: None,
+        };
+
+        let root_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, root_id);
+
+        tree.insert(key("c"), record(1, 2)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_preserves_sorted_order() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("d"), record(1, 3)).unwrap();
+        tree.insert(key("a"), record(1, 0)).unwrap();
+        tree.insert(key("c"), record(1, 2)).unwrap();
+        tree.insert(key("b"), record(1, 1)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+                (key("d"), record(1, 3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_preserves_key_value_alignment() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("a"), record(10, 0)).unwrap();
+        tree.insert(key("c"), record(10, 2)).unwrap();
+        tree.insert(key("b"), record(10, 1)).unwrap();
+
+        assert_eq!(tree.search(&key("a")).unwrap(), Some(record(10, 0)));
+
+        assert_eq!(tree.search(&key("b")).unwrap(), Some(record(10, 1)));
+
+        assert_eq!(tree.search(&key("c")).unwrap(), Some(record(10, 2)));
+    }
+
+    #[test]
+    fn insert_duplicate_key_returns_error() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("a"), record(1, 0)).unwrap();
+
+        let result = tree.insert(key("a"), record(2, 0));
+
+        assert!(matches!(result, Err(BPlusTreeError::DuplicateKey)));
+    }
+
+    #[test]
+    fn duplicate_insert_does_not_modify_existing_value() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("a"), record(1, 0)).unwrap();
+
+        let result = tree.insert(key("a"), record(2, 0));
+
+        assert!(matches!(result, Err(BPlusTreeError::DuplicateKey)));
+
+        assert_eq!(tree.search(&key("a")).unwrap(), Some(record(1, 0)));
+    }
+
+    #[test]
+    fn duplicate_insert_does_not_modify_tree() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("a"), record(1, 0)).unwrap();
+        tree.insert(key("c"), record(1, 2)).unwrap();
+
+        let before = tree.scan().unwrap();
+
+        let result = tree.insert(key("a"), record(99, 99));
+
+        assert!(matches!(result, Err(BPlusTreeError::DuplicateKey)));
+
+        let after = tree.scan().unwrap();
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn insert_fills_leaf_until_capacity() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let mut inserted = Vec::new();
+
+        for i in 0..100 {
+            let key = key(&format!("{i:03}"));
+            let record_id = record(1, i as u16);
+
+            match tree.insert(key.clone(), record_id) {
+                Ok(()) => inserted.push((key, record_id)),
+                Err(BPlusTreeError::LeafFull) => break,
+                Err(error) => panic!("unexpected insertion error: {error}"),
+            }
+        }
+
+        assert!(!inserted.is_empty(), "at least one record should fit");
+
+        assert_eq!(tree.scan().unwrap(), inserted);
+    }
+
+    #[test]
+    fn leaf_full_does_not_modify_tree() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let mut inserted = Vec::new();
+
+        for i in 0..1000 {
+            let key = key(&format!("{i:04}"));
+            let record_id = record(1, i as u16);
+
+            match tree.insert(key.clone(), record_id) {
+                Ok(()) => inserted.push((key, record_id)),
+                Err(BPlusTreeError::LeafFull) => {
+                    let after = tree.scan().unwrap();
+
+                    assert_eq!(after, inserted);
+                    return;
+                }
+                Err(error) => panic!("unexpected insertion error: {error}"),
+            }
+        }
+
+        panic!("expected leaf to become full");
+    }
+
+    #[test]
+    fn insert_after_leaf_full_returns_leaf_full() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        for i in 0..1000 {
+            let current_key = key(&format!("{i:04}"));
+            let record_id = record(1, i as u16);
+
+            match tree.insert(current_key, record_id) {
+                Ok(()) => {}
+
+                Err(BPlusTreeError::LeafFull) => {
+                    let next_key = key(&format!("{:04}", i + 1));
+
+                    let result = tree.insert(next_key, record(2, 0));
+
+                    assert!(matches!(result, Err(BPlusTreeError::LeafFull)));
+
+                    return;
+                }
+
+                Err(error) => {
+                    panic!("unexpected insertion error: {error}");
+                }
+            }
+        }
+
+        panic!("expected leaf to become full");
+    }
+
+    #[test]
+    fn insert_then_search_finds_key() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("hello"), record(42, 7)).unwrap();
+
+        assert_eq!(tree.search(&key("hello")).unwrap(), Some(record(42, 7)));
+    }
+
+    #[test]
+    fn insert_then_scan_returns_inserted_entries() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(key("c"), record(1, 2)).unwrap();
+        tree.insert(key("a"), record(1, 0)).unwrap();
+        tree.insert(key("b"), record(1, 1)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_preserves_existing_next_leaf() {
+        let mut store = MemoryNodeStore::new();
+
+        let next_leaf = BPlusNode::Leaf {
+            keys: vec![key("z")],
+            values: vec![record(2, 0)],
+            next_leaf: None,
+        };
+
+        let next_leaf_id = store.allocate_node(&next_leaf).unwrap();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("a"), key("c")],
+            values: vec![record(1, 0), record(1, 2)],
+            next_leaf: Some(next_leaf_id),
+        };
+
+        let root_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, root_id);
+
+        tree.insert(key("b"), record(1, 1)).unwrap();
+
+        assert_eq!(
+            tree.scan().unwrap(),
+            vec![
+                (key("a"), record(1, 0)),
+                (key("b"), record(1, 1)),
+                (key("c"), record(1, 2)),
+                (key("z"), record(2, 0)),
+            ]
+        );
     }
 }
