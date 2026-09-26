@@ -8,4 +8,5 @@ pub use node::BPlusNode;
 pub mod node_codec;
 pub mod node_store;
 pub mod storage;
+pub mod tree;
 pub mod utilities;

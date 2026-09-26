@@ -1,4 +1,4 @@
-use crate::error::BPlusTreeError;
+use crate::error::BPlusNodeError;
 use crate::node_codec::HEADER_SIZE;
 use crate::page_id::PageId;
 use crate::utilities::has_duplicates;
@@ -18,7 +18,7 @@ pub enum BPlusNode {
 }
 
 impl BPlusNode {
-    pub fn validate_with_page_id(&self, page_id: PageId) -> Result<(), BPlusTreeError> {
+    pub fn validate_with_page_id(&self, page_id: PageId) -> Result<(), BPlusNodeError> {
         match self {
             BPlusNode::Leaf {
                 keys,
@@ -26,19 +26,19 @@ impl BPlusNode {
                 next_leaf: _,
             } => {
                 if keys.len() != values.len() {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys and Values length mismatch."),
                     });
                 }
                 if !keys.is_sorted() {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys aren't sorted."),
                     });
                 }
                 if has_duplicates(keys) {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys must be unique."),
                     });
@@ -47,25 +47,25 @@ impl BPlusNode {
             }
             BPlusNode::Internal { keys, children } => {
                 if children.len() != keys.len().checked_add(1).unwrap_or(0) {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys and Children length mismatch."),
                     });
                 }
                 if !keys.is_sorted() {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys aren't sorted."),
                     });
                 }
                 if has_duplicates(keys) {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Keys must be unique."),
                     });
                 }
                 if children.is_empty() {
-                    return Err(BPlusTreeError::CorruptNode {
+                    return Err(BPlusNodeError::CorruptNode {
                         page_id,
                         reason: String::from("Atleast one child is required."),
                     });
@@ -75,7 +75,7 @@ impl BPlusNode {
         }
     }
 
-    pub fn validate(&self) -> Result<(), BPlusTreeError> {
+    pub fn validate(&self) -> Result<(), BPlusNodeError> {
         match self {
             BPlusNode::Leaf {
                 keys,
@@ -83,17 +83,17 @@ impl BPlusNode {
                 next_leaf: _,
             } => {
                 if keys.len() != values.len() {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys and Values length mismatch."),
                     });
                 }
                 if !keys.is_sorted() {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys aren't sorted."),
                     });
                 }
                 if has_duplicates(keys) {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys must be unique."),
                     });
                 }
@@ -101,22 +101,22 @@ impl BPlusNode {
             }
             BPlusNode::Internal { keys, children } => {
                 if children.len() != keys.len().checked_add(1).unwrap_or(0) {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys and Children length mismatch."),
                     });
                 }
                 if !keys.is_sorted() {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys aren't sorted."),
                     });
                 }
                 if has_duplicates(keys) {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Keys must be unique."),
                     });
                 }
                 if children.is_empty() {
-                    return Err(BPlusTreeError::InvalidNode {
+                    return Err(BPlusNodeError::InvalidNode {
                         reason: String::from("Atleast one child is required."),
                     });
                 }
@@ -124,12 +124,12 @@ impl BPlusNode {
             }
         }
     }
-    pub fn encoded_len(&self) -> Result<usize, BPlusTreeError> {
+    pub fn encoded_len(&self) -> Result<usize, BPlusNodeError> {
         self.validate()?;
         let mut len = 0usize;
         len = len
             .checked_add(HEADER_SIZE)
-            .ok_or(BPlusTreeError::SizeOverflow)?; // 4 bytes MAGIC + 1 byte FORMAT + 1 byte Node variant
+            .ok_or(BPlusNodeError::SizeOverflow)?; // 4 bytes MAGIC + 1 byte FORMAT + 1 byte Node variant
 
         match self {
             BPlusNode::Leaf {
@@ -138,34 +138,34 @@ impl BPlusNode {
                 next_leaf,
             } => {
                 if next_leaf.is_some() {
-                    len = len.checked_add(9).ok_or(BPlusTreeError::SizeOverflow)?;
+                    len = len.checked_add(9).ok_or(BPlusNodeError::SizeOverflow)?;
                 // next_leaf with it's data PageId
                 } else {
-                    len = len.checked_add(1).ok_or(BPlusTreeError::SizeOverflow)?;
+                    len = len.checked_add(1).ok_or(BPlusNodeError::SizeOverflow)?;
                     // next_leaf
                 }
-                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_count
+                len = len.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?; // key_count
                 for i in keys {
-                    len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_len
+                    len = len.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?; // key_len
                     len = len
                         .checked_add(i.as_bytes().len())
-                        .ok_or(BPlusTreeError::SizeOverflow)?; // key_bytes
-                    len = len.checked_add(10).ok_or(BPlusTreeError::SizeOverflow)?;
+                        .ok_or(BPlusNodeError::SizeOverflow)?; // key_bytes
+                    len = len.checked_add(10).ok_or(BPlusNodeError::SizeOverflow)?;
                     // record
                 }
                 Ok(len)
             }
             BPlusNode::Internal { keys, children } => {
-                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_count
+                len = len.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?; // key_count
                 for i in keys {
-                    len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; // key_len
+                    len = len.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?; // key_len
                     len = len
                         .checked_add(i.as_bytes().len())
-                        .ok_or(BPlusTreeError::SizeOverflow)?; // key_bytes
+                        .ok_or(BPlusNodeError::SizeOverflow)?; // key_bytes
                 }
-                len = len.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?; //children_count
+                len = len.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?; //children_count
                 for _ in children {
-                    len = len.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?;
+                    len = len.checked_add(8).ok_or(BPlusNodeError::SizeOverflow)?;
                     //children_bytes
                 }
                 Ok(len)
@@ -352,7 +352,7 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
-    use crate::error::BPlusTreeError;
+    use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
@@ -370,9 +370,9 @@ mod validation_tests {
         RecordId::new(PageId::new(100), slot)
     }
 
-    fn assert_corrupt_node(result: Result<(), BPlusTreeError>, expected_page_id: PageId) {
+    fn assert_corrupt_node(result: Result<(), BPlusNodeError>, expected_page_id: PageId) {
         match result {
-            Err(BPlusTreeError::CorruptNode { page_id, reason: _ }) => {
+            Err(BPlusNodeError::CorruptNode { page_id, reason: _ }) => {
                 assert_eq!(page_id, expected_page_id);
             }
             other => panic!("expected CorruptNode error, got {other:?}"),

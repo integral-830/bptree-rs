@@ -4,9 +4,9 @@ use thiserror::Error;
 
 use crate::page_id::PageId;
 
-/// Error enum for this crate implementing `thiserror`crate
+/// Error enum for `BPlusTreeNode` implementing `thiserror`crate
 #[derive(Debug, Error)]
-pub enum BPlusTreeError {
+pub enum BPlusNodeError {
     /// enum variant invalid Configuration error
     #[error("Invalid Configuration reason: {reason}")]
     InvalidConfiguration { reason: String },
@@ -48,6 +48,17 @@ pub enum BPlusTreeError {
     InvalidPayload { found: usize },
 }
 
+/// Error enum for `BPlusTree`
+#[derive(Debug, Error)]
+pub enum BPlusTreeError<E> {
+    #[error("node store error: {0}")]
+    Storage(#[from] E),
+    #[error("node error: {0}")]
+    Node(BPlusNodeError),
+    #[error("invalid tree state: {0}")]
+    InvalidTreeState(&'static str),
+}
+
 #[cfg(test)]
 mod error_tests {
     use super::*;
@@ -56,16 +67,16 @@ mod error_tests {
 
     #[test]
     fn invalid_configuration_can_be_constructed() {
-        let error = BPlusTreeError::InvalidConfiguration {
+        let error = BPlusNodeError::InvalidConfiguration {
             reason: "node capacity must be non-zero".to_string(),
         };
 
-        assert!(matches!(error, BPlusTreeError::InvalidConfiguration { .. }));
+        assert!(matches!(error, BPlusNodeError::InvalidConfiguration { .. }));
     }
 
     #[test]
     fn invalid_configuration_display_contains_reason() {
-        let error = BPlusTreeError::InvalidConfiguration {
+        let error = BPlusNodeError::InvalidConfiguration {
             reason: "node capacity must be non-zero".to_string(),
         };
 
@@ -76,17 +87,17 @@ mod error_tests {
 
     #[test]
     fn corrupt_node_can_be_constructed() {
-        let error = BPlusTreeError::CorruptNode {
+        let error = BPlusNodeError::CorruptNode {
             page_id: PageId::new(7),
             reason: "invalid child count".to_string(),
         };
 
-        assert!(matches!(error, BPlusTreeError::CorruptNode { .. }));
+        assert!(matches!(error, BPlusNodeError::CorruptNode { .. }));
     }
 
     #[test]
     fn corrupt_node_display_contains_page_id() {
-        let error = BPlusTreeError::CorruptNode {
+        let error = BPlusNodeError::CorruptNode {
             page_id: PageId::new(7),
             reason: "invalid child count".to_string(),
         };
@@ -101,7 +112,7 @@ mod error_tests {
 
     #[test]
     fn corrupt_node_display_contains_reason() {
-        let error = BPlusTreeError::CorruptNode {
+        let error = BPlusNodeError::CorruptNode {
             page_id: PageId::new(7),
             reason: "invalid child count".to_string(),
         };
@@ -116,7 +127,7 @@ mod error_tests {
 
     #[test]
     fn corrupt_node_display_contains_page_id_and_reason() {
-        let error = BPlusTreeError::CorruptNode {
+        let error = BPlusNodeError::CorruptNode {
             page_id: PageId::new(42),
             reason: "malformed separator keys".to_string(),
         };
@@ -131,12 +142,12 @@ mod error_tests {
     fn error_implements_std_error() {
         fn assert_error<T: Error>() {}
 
-        assert_error::<BPlusTreeError>();
+        assert_error::<BPlusNodeError>();
     }
 
     #[test]
     fn error_implements_debug() {
-        let error = BPlusTreeError::InvalidConfiguration {
+        let error = BPlusNodeError::InvalidConfiguration {
             reason: "invalid order".to_string(),
         };
 
@@ -147,7 +158,7 @@ mod error_tests {
 
     #[test]
     fn corrupt_node_debug_contains_variant_name() {
-        let error = BPlusTreeError::CorruptNode {
+        let error = BPlusNodeError::CorruptNode {
             page_id: PageId::new(3),
             reason: "bad node".to_string(),
         };
@@ -159,12 +170,12 @@ mod error_tests {
 
     #[test]
     fn distinct_corruption_reasons_are_preserved() {
-        let first = BPlusTreeError::CorruptNode {
+        let first = BPlusNodeError::CorruptNode {
             page_id: PageId::new(1),
             reason: "invalid key ordering".to_string(),
         };
 
-        let second = BPlusTreeError::CorruptNode {
+        let second = BPlusNodeError::CorruptNode {
             page_id: PageId::new(1),
             reason: "invalid child pointer".to_string(),
         };

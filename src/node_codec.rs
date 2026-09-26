@@ -1,16 +1,16 @@
 use crate::{
-    BPlusNode, error::BPlusTreeError, key::Key, page_id::PageId, record_id::RecordId,
-    slotted_page::PAGE_SIZE,
+    error::BPlusNodeError, key::Key, page_id::PageId, record_id::RecordId, slotted_page::PAGE_SIZE,
+    BPlusNode,
 };
 
 pub const MAGIC: [u8; 4] = *b"BTR4";
 pub const FORMAT_VERSION: u8 = 1;
 pub const HEADER_SIZE: usize = 6; // 4 bytes MAGIC + 1 byte FORMAT + 1 byte Node variant
 pub const PAGE_ID_SIZE: usize = 8; // 8 bytes
-pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
+pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusNodeError> {
     let node_size = node.encoded_len()?;
     if node_size > PAGE_SIZE {
-        return Err(BPlusTreeError::NodeTooLarge {
+        return Err(BPlusNodeError::NodeTooLarge {
             reason: String::from("Node size is bigger than PAGE_SIZE: 4096"),
         });
     }
@@ -37,28 +37,28 @@ pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
             }
             for (key, val) in keys.iter().zip(values.iter()) {
                 let key_len = u16::try_from(key.as_bytes().len())?;
-                buffer[cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?]
+                buffer[cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(&key_len.to_le_bytes()); // key_len
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
                 buffer[cursor
                     ..cursor
                         .checked_add(key_len as usize)
-                        .ok_or(BPlusTreeError::SizeOverflow)?]
+                        .ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(key.as_bytes()); // key_bytes
                 cursor = cursor
                     .checked_add(key_len as usize)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
                 buffer[cursor
                     ..cursor
                         .checked_add(PAGE_ID_SIZE)
-                        .ok_or(BPlusTreeError::SizeOverflow)?]
+                        .ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(&val.page_id().get().to_le_bytes()); // page_id
                 cursor = cursor
                     .checked_add(PAGE_ID_SIZE)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
-                buffer[cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?]
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
+                buffer[cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(&val.slot_id().to_le_bytes()); // slot_id
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
             }
             Ok(buffer)
         }
@@ -69,90 +69,90 @@ pub fn encode(node: &BPlusNode) -> Result<[u8; PAGE_SIZE], BPlusTreeError> {
             let mut cursor: usize = 8;
             for key in keys {
                 let key_len = u16::try_from(key.as_bytes().len())?;
-                buffer[cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?]
+                buffer[cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(&key_len.to_le_bytes()); // key_len
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
                 buffer[cursor
                     ..cursor
                         .checked_add(key_len as usize)
-                        .ok_or(BPlusTreeError::SizeOverflow)?]
+                        .ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(key.as_bytes()); // key_bytes
                 cursor = cursor
                     .checked_add(key_len as usize)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
             }
-            buffer[cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?]
+            buffer[cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?]
                 .copy_from_slice(
                     &(key_count
                         .checked_add(1)
-                        .ok_or(BPlusTreeError::SizeOverflow)?)
+                        .ok_or(BPlusNodeError::SizeOverflow)?)
                     .to_le_bytes(),
                 ); // children_count
-            cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+            cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
             for child in children {
                 let child = child.get();
                 buffer[cursor
                     ..cursor
                         .checked_add(PAGE_ID_SIZE)
-                        .ok_or(BPlusTreeError::SizeOverflow)?]
+                        .ok_or(BPlusNodeError::SizeOverflow)?]
                     .copy_from_slice(&child.to_le_bytes()); // child
-                cursor = cursor.checked_add(8).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor.checked_add(8).ok_or(BPlusNodeError::SizeOverflow)?;
             }
             Ok(buffer)
         }
     }
 }
 
-pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
-    let magic_bytes: &[u8] = page.get(0..4).ok_or(BPlusTreeError::NodeSlicingErr)?;
+pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusNodeError> {
+    let magic_bytes: &[u8] = page.get(0..4).ok_or(BPlusNodeError::NodeSlicingErr)?;
     if magic_bytes != MAGIC {
-        return Err(BPlusTreeError::InvalidHeader {
+        return Err(BPlusNodeError::InvalidHeader {
             reason: String::from("Invalid MAGIC"),
         });
     }
     let format_bytes: [u8; 1] = page
         .get(4..5)
-        .ok_or(BPlusTreeError::NodeSlicingErr)?
+        .ok_or(BPlusNodeError::NodeSlicingErr)?
         .try_into()
-        .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+        .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
     let format: u8 = u8::from_le_bytes(format_bytes);
     if format != FORMAT_VERSION {
-        return Err(BPlusTreeError::InvalidHeader {
+        return Err(BPlusNodeError::InvalidHeader {
             reason: String::from("Invalid FORMAT"),
         });
     }
-    let node_type_bytes: &[u8] = page.get(5..6).ok_or(BPlusTreeError::NodeSlicingErr)?;
+    let node_type_bytes: &[u8] = page.get(5..6).ok_or(BPlusNodeError::NodeSlicingErr)?;
     let node_type_array: [u8; 1] = node_type_bytes
         .try_into()
-        .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+        .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
     let node_type: u8 = u8::from_le_bytes(node_type_array);
     match node_type {
         1 => {
             let key_count_bytes: [u8; 2] = page
                 .get(6..8)
-                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .ok_or(BPlusNodeError::NodeSlicingErr)?
                 .try_into()
-                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
             let key_count: u16 = u16::from_le_bytes(key_count_bytes);
             let next_leaf_bytes: [u8; 1] = page
                 .get(8..9)
-                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .ok_or(BPlusNodeError::NodeSlicingErr)?
                 .try_into()
-                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
             let next_leaf: u8 = u8::from_le_bytes(next_leaf_bytes);
             let mut next_leaf_data = None;
             let mut cursor: usize = 9;
             if next_leaf == 1 {
                 let next_leaf_temp_data_bytes: [u8; 8] = page
                     .get(9..17)
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
                 let page_id = PageId::new(u64::from_le_bytes(next_leaf_temp_data_bytes));
                 next_leaf_data = Some(page_id);
                 cursor = 17;
             } else if next_leaf != 0 {
-                return Err(BPlusTreeError::InvalidNextLeafValue {
+                return Err(BPlusNodeError::InvalidNextLeafValue {
                     found: next_leaf as usize,
                 });
             }
@@ -160,43 +160,43 @@ pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
             let mut val_vec: Vec<RecordId> = Vec::new();
             for _ in 0..key_count {
                 let key_len_bytes: &[u8] = page
-                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?)
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
                 let key_len_array: [u8; 2] = key_len_bytes
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
                 let key_len = u16::from_le_bytes(key_len_array) as usize;
                 let key_bytes: &[u8] = page
                     .get(
                         cursor
                             ..cursor
                                 .checked_add(key_len)
-                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                                .ok_or(BPlusNodeError::SizeOverflow)?,
                     )
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?;
                 cursor = cursor
                     .checked_add(key_len)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
                 let page_id_bytes: [u8; 8] = page
                     .get(
                         cursor
                             ..cursor
                                 .checked_add(PAGE_ID_SIZE)
-                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                                .ok_or(BPlusNodeError::SizeOverflow)?,
                     )
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
                 cursor = cursor
                     .checked_add(PAGE_ID_SIZE)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
                 let slot_id_bytes: [u8; 2] = page
-                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?)
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
                 let key = Key::new(key_bytes.to_owned());
                 let page_id = PageId::new(u64::from_le_bytes(page_id_bytes));
                 let slot_id = u16::from_le_bytes(slot_id_bytes);
@@ -215,59 +215,59 @@ pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
         0 => {
             let key_count: [u8; 2] = page
                 .get(6..8)
-                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .ok_or(BPlusNodeError::NodeSlicingErr)?
                 .try_into()
-                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
             let key_count: u16 = u16::from_le_bytes(key_count);
             let mut cursor: usize = 8;
             let mut keys_vec: Vec<Key> = Vec::new();
             let mut val_vec: Vec<PageId> = Vec::new();
             for _ in 0..key_count {
                 let key_len: [u8; 2] = page
-                    .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .get(cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?)
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
                 let key_len = u16::from_le_bytes(key_len) as usize;
-                cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+                cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
                 let key_bytes: &[u8] = page
                     .get(
                         cursor
                             ..cursor
                                 .checked_add(key_len)
-                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                                .ok_or(BPlusNodeError::SizeOverflow)?,
                     )
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?;
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?;
                 cursor = cursor
                     .checked_add(key_len)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
                 let key = Key::new(key_bytes.to_owned());
                 keys_vec.push(key);
             }
             let children_count: [u8; 2] = page
-                .get(cursor..cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?)
-                .ok_or(BPlusTreeError::NodeSlicingErr)?
+                .get(cursor..cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?)
+                .ok_or(BPlusNodeError::NodeSlicingErr)?
                 .try_into()
-                .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
             let children_count: u16 = u16::from_le_bytes(children_count);
-            cursor = cursor.checked_add(2).ok_or(BPlusTreeError::SizeOverflow)?;
+            cursor = cursor.checked_add(2).ok_or(BPlusNodeError::SizeOverflow)?;
             if children_count
                 != key_count
                     .checked_add(1)
-                    .ok_or(BPlusTreeError::SizeOverflow)?
+                    .ok_or(BPlusNodeError::SizeOverflow)?
             {
-                return Err(BPlusTreeError::NodeDecodingErr {
+                return Err(BPlusNodeError::NodeDecodingErr {
                     reason: String::from("Children and Key count not satisfied while decoding."),
                 });
             }
             let required_bytes = (children_count as usize)
                 .checked_mul(PAGE_ID_SIZE)
-                .ok_or(BPlusTreeError::SizeOverflow)?;
+                .ok_or(BPlusNodeError::SizeOverflow)?;
             let payload_end = cursor
                 .checked_add(required_bytes)
-                .ok_or(BPlusTreeError::SizeOverflow)?;
+                .ok_or(BPlusNodeError::SizeOverflow)?;
             if payload_end > PAGE_SIZE {
-                return Err(BPlusTreeError::InvalidPayload { found: payload_end });
+                return Err(BPlusNodeError::InvalidPayload { found: payload_end });
             }
             for _ in 0..children_count {
                 let page_id_bytes: [u8; 8] = page
@@ -275,14 +275,14 @@ pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
                         cursor
                             ..cursor
                                 .checked_add(PAGE_ID_SIZE)
-                                .ok_or(BPlusTreeError::SizeOverflow)?,
+                                .ok_or(BPlusNodeError::SizeOverflow)?,
                     )
-                    .ok_or(BPlusTreeError::NodeSlicingErr)?
+                    .ok_or(BPlusNodeError::NodeSlicingErr)?
                     .try_into()
-                    .map_err(|_| BPlusTreeError::NodeSlicingErr)?;
+                    .map_err(|_| BPlusNodeError::NodeSlicingErr)?;
                 cursor = cursor
                     .checked_add(PAGE_ID_SIZE)
-                    .ok_or(BPlusTreeError::SizeOverflow)?;
+                    .ok_or(BPlusNodeError::SizeOverflow)?;
                 let page_id = PageId::new(u64::from_le_bytes(page_id_bytes));
                 val_vec.push(page_id);
             }
@@ -293,14 +293,14 @@ pub fn decode(page: &[u8; PAGE_SIZE]) -> Result<BPlusNode, BPlusTreeError> {
             node.validate()?;
             Ok(node)
         }
-        _ => Err(BPlusTreeError::InvalidNodeType),
+        _ => Err(BPlusNodeError::InvalidNodeType),
     }
 }
 
 #[cfg(test)]
 mod node_codec_encode_tests {
     use super::*;
-    use crate::error::BPlusTreeError;
+    use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::node::BPlusNode;
     use crate::page_id::PageId;
@@ -603,7 +603,7 @@ mod node_codec_encode_tests {
 
         assert!(matches!(
             encode(&node),
-            Err(BPlusTreeError::NodeTooLarge { .. })
+            Err(BPlusNodeError::NodeTooLarge { .. })
         ));
     }
 
@@ -619,7 +619,7 @@ mod node_codec_encode_tests {
 
         assert!(matches!(
             node.validate_with_page_id(page),
-            Err(BPlusTreeError::CorruptNode { page_id, .. })
+            Err(BPlusNodeError::CorruptNode { page_id, .. })
                 if page_id == page
         ));
     }
@@ -634,7 +634,7 @@ mod node_codec_encode_tests {
 
         assert!(matches!(
             node.validate(),
-            Err(BPlusTreeError::InvalidNode { .. })
+            Err(BPlusNodeError::InvalidNode { .. })
         ));
     }
 }
