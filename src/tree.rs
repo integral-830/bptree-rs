@@ -142,6 +142,50 @@ impl<S: NodeStore> BPlusTree<S> {
             }
         }
     }
+    fn split_leaf(
+        &mut self,
+        page_id: PageId,
+        keys: Vec<Key>,
+        values: Vec<RecordId>,
+        next_leaf: Option<PageId>,
+    ) -> Result<(PageId, Key), BPlusTreeError<S::Error>> {
+        debug_assert!(!keys.is_empty());
+        debug_assert_eq!(keys.len(), values.len());
+
+        let split_index = keys.len() / 2;
+
+        debug_assert!(split_index > 0);
+        debug_assert!(split_index < keys.len());
+
+        let right_keys = keys[split_index..].to_vec();
+        let right_values = values[split_index..].to_vec();
+
+        let left_keys = keys[..split_index].to_vec();
+        let left_values = values[..split_index].to_vec();
+
+        let separator = right_keys
+            .first()
+            .cloned()
+            .expect("right leaf must contain at least one key");
+
+        let right_leaf = BPlusNode::Leaf {
+            keys: right_keys,
+            values: right_values,
+            next_leaf,
+        };
+
+        let right_page_id = self.store.allocate_node(&right_leaf)?;
+
+        let left_leaf = BPlusNode::Leaf {
+            keys: left_keys,
+            values: left_values,
+            next_leaf: Some(right_page_id),
+        };
+
+        self.store.write_node(page_id, &left_leaf)?;
+
+        Ok((right_page_id, separator))
+    }
     pub fn insert(
         &mut self,
         key: Key,
@@ -1487,7 +1531,6 @@ pub mod tree_tests {
 
         let tree = BPlusTree::from_root(store, root_page_id);
 
-        // Separator equality must route to the right child.
         let search_key = key("0010");
 
         let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
@@ -1500,13 +1543,6 @@ pub mod tree_tests {
     #[test]
     fn find_leaf_path_multiple_internal_levels() {
         let mut store = MemoryNodeStore::new();
-
-        // Leaves:
-        //
-        // L1: [0001]
-        // L2: [0010]
-        // L3: [0020]
-        // L4: [0030]
 
         let l1 = BPlusNode::Leaf {
             keys: vec![key("0001")],
@@ -1537,11 +1573,6 @@ pub mod tree_tests {
         let l3_page_id = store.allocate_node(&l3).unwrap();
         let l4_page_id = store.allocate_node(&l4).unwrap();
 
-        // First internal node:
-        //
-        //       N1
-        //      /  \
-        //    L1   L2
         let n1 = BPlusNode::Internal {
             keys: vec![key("0010")],
             children: vec![l1_page_id, l2_page_id],
@@ -1549,11 +1580,6 @@ pub mod tree_tests {
 
         let n1_page_id = store.allocate_node(&n1).unwrap();
 
-        // Second internal node:
-        //
-        //       N2
-        //      /  \
-        //    L3   L4
         let n2 = BPlusNode::Internal {
             keys: vec![key("0030")],
             children: vec![l3_page_id, l4_page_id],
@@ -1561,13 +1587,6 @@ pub mod tree_tests {
 
         let n2_page_id = store.allocate_node(&n2).unwrap();
 
-        // Root:
-        //
-        //             ROOT
-        //            /    \
-        //          N1      N2
-        //         /  \    /  \
-        //        L1  L2  L3  L4
         let root = BPlusNode::Internal {
             keys: vec![key("0020")],
             children: vec![n1_page_id, n2_page_id],
@@ -1584,5 +1603,427 @@ pub mod tree_tests {
         assert_eq!(ancestors, vec![root_page_id, n1_page_id]);
         assert_eq!(leaf_page_id, l2_page_id);
         assert!(matches!(node, BPlusNode::Leaf { .. }));
+    }
+    #[test]
+    fn split_leaf_preserves_all_entries() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![
+                key("0001"),
+                key("0002"),
+                key("0003"),
+                key("0004"),
+                key("0005"),
+                key("0006"),
+            ],
+            values: vec![
+                record(1, 1),
+                record(1, 2),
+                record(1, 3),
+                record(1, 4),
+                record(1, 5),
+                record(1, 6),
+            ],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, separator) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![
+                    key("0001"),
+                    key("0002"),
+                    key("0003"),
+                    key("0004"),
+                    key("0005"),
+                    key("0006"),
+                ],
+                vec![
+                    record(1, 1),
+                    record(1, 2),
+                    record(1, 3),
+                    record(1, 4),
+                    record(1, 5),
+                    record(1, 6),
+                ],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(separator, key("0004"));
+
+        let (_, left_node) = tree.find_leaf(&key("0001")).unwrap();
+
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        match left_node {
+            BPlusNode::Leaf {
+                keys,
+                values,
+                next_leaf,
+            } => {
+                assert_eq!(keys, vec![key("0001"), key("0002"), key("0003")]);
+
+                assert_eq!(values, vec![record(1, 1), record(1, 2), record(1, 3),]);
+
+                assert_eq!(next_leaf, Some(right_page_id));
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected left leaf");
+            }
+        }
+
+        match right_node {
+            BPlusNode::Leaf {
+                keys,
+                values,
+                next_leaf,
+            } => {
+                assert_eq!(keys, vec![key("0004"), key("0005"), key("0006")]);
+
+                assert_eq!(values, vec![record(1, 4), record(1, 5), record(1, 6),]);
+
+                assert_eq!(next_leaf, None);
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected right leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_preserves_key_value_alignment() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
+            values: vec![record(10, 1), record(10, 2), record(10, 3), record(10, 4)],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, separator) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![key("0001"), key("0002"), key("0003"), key("0004")],
+                vec![record(10, 1), record(10, 2), record(10, 3), record(10, 4)],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(separator, key("0003"));
+
+        let (_, left_node) = tree.find_leaf(&key("0001")).unwrap();
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        match left_node {
+            BPlusNode::Leaf { keys, values, .. } => {
+                assert_eq!(keys, vec![key("0001"), key("0002")]);
+
+                assert_eq!(values, vec![record(10, 1), record(10, 2)]);
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected left leaf");
+            }
+        }
+
+        match right_node {
+            BPlusNode::Leaf { keys, values, .. } => {
+                assert_eq!(keys, vec![key("0003"), key("0004")]);
+
+                assert_eq!(values, vec![record(10, 3), record(10, 4)]);
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected right leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_preserves_existing_next_leaf() {
+        let mut store = MemoryNodeStore::new();
+
+        let next_leaf = BPlusNode::Leaf {
+            keys: vec![key("0010")],
+            values: vec![record(2, 10)],
+            next_leaf: None,
+        };
+
+        let next_page_id = store.allocate_node(&next_leaf).unwrap();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
+            values: vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+            next_leaf: Some(next_page_id),
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, separator) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![key("0001"), key("0002"), key("0003"), key("0004")],
+                vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+                Some(next_page_id),
+            )
+            .unwrap();
+
+        assert_eq!(separator, key("0003"));
+
+        let left_node = tree.store.read_node(leaf_page_id).unwrap();
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        match left_node {
+            BPlusNode::Leaf { next_leaf, .. } => {
+                assert_eq!(next_leaf, Some(right_page_id));
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected left leaf");
+            }
+        }
+
+        match right_node {
+            BPlusNode::Leaf { next_leaf, .. } => {
+                assert_eq!(next_leaf, Some(next_page_id));
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected right leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_rightmost_sets_right_next_to_none() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
+            values: vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, separator) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![key("0001"), key("0002"), key("0003"), key("0004")],
+                vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(separator, key("0003"));
+
+        let left_node = tree.store.read_node(leaf_page_id).unwrap();
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        match left_node {
+            BPlusNode::Leaf { next_leaf, .. } => {
+                assert_eq!(next_leaf, Some(right_page_id));
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected left leaf");
+            }
+        }
+
+        match right_node {
+            BPlusNode::Leaf { next_leaf, .. } => {
+                assert_eq!(next_leaf, None);
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected right leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_separator_is_first_right_key() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![
+                key("0010"),
+                key("0020"),
+                key("0030"),
+                key("0040"),
+                key("0050"),
+                key("0060"),
+            ],
+            values: vec![
+                record(1, 10),
+                record(1, 20),
+                record(1, 30),
+                record(1, 40),
+                record(1, 50),
+                record(1, 60),
+            ],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, separator) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![
+                    key("0010"),
+                    key("0020"),
+                    key("0030"),
+                    key("0040"),
+                    key("0050"),
+                    key("0060"),
+                ],
+                vec![
+                    record(1, 10),
+                    record(1, 20),
+                    record(1, 30),
+                    record(1, 40),
+                    record(1, 50),
+                    record(1, 60),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        match right_node {
+            BPlusNode::Leaf { keys, .. } => {
+                assert_eq!(separator, keys[0]);
+                assert_eq!(separator, key("0040"));
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("expected right leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_keeps_original_page_as_left_leaf() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
+            values: vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, _) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![key("0001"), key("0002"), key("0003"), key("0004")],
+                vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
+                None,
+            )
+            .unwrap();
+
+        assert_ne!(leaf_page_id, right_page_id);
+
+        let left_node = tree.store.read_node(leaf_page_id).unwrap();
+
+        match left_node {
+            BPlusNode::Leaf { keys, .. } => {
+                assert_eq!(keys, vec![key("0001"), key("0002")]);
+            }
+
+            BPlusNode::Internal { .. } => {
+                panic!("original page must remain the left leaf");
+            }
+        }
+    }
+    #[test]
+    fn split_leaf_preserves_sorted_order() {
+        let mut store = MemoryNodeStore::new();
+
+        let leaf = BPlusNode::Leaf {
+            keys: vec![
+                key("0010"),
+                key("0020"),
+                key("0030"),
+                key("0040"),
+                key("0050"),
+                key("0060"),
+            ],
+            values: vec![
+                record(1, 10),
+                record(1, 20),
+                record(1, 30),
+                record(1, 40),
+                record(1, 50),
+                record(1, 60),
+            ],
+            next_leaf: None,
+        };
+
+        let leaf_page_id = store.allocate_node(&leaf).unwrap();
+
+        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+
+        let (right_page_id, _) = tree
+            .split_leaf(
+                leaf_page_id,
+                vec![
+                    key("0010"),
+                    key("0020"),
+                    key("0030"),
+                    key("0040"),
+                    key("0050"),
+                    key("0060"),
+                ],
+                vec![
+                    record(1, 10),
+                    record(1, 20),
+                    record(1, 30),
+                    record(1, 40),
+                    record(1, 50),
+                    record(1, 60),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let left_node = tree.store.read_node(leaf_page_id).unwrap();
+        let right_node = tree.store.read_node(right_page_id).unwrap();
+
+        let (left_keys, right_keys) = match (left_node, right_node) {
+            (
+                BPlusNode::Leaf {
+                    keys: left_keys, ..
+                },
+                BPlusNode::Leaf {
+                    keys: right_keys, ..
+                },
+            ) => (left_keys, right_keys),
+
+            _ => panic!("expected two leaf nodes"),
+        };
+
+        assert!(left_keys.windows(2).all(|w| w[0] < w[1]));
+        assert!(right_keys.windows(2).all(|w| w[0] < w[1]));
+
+        assert!(left_keys.last().unwrap() < right_keys.first().unwrap());
     }
 }
