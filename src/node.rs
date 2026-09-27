@@ -352,11 +352,12 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
-    use crate::BPlusNode;
     use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
+    use crate::slotted_page::PAGE_SIZE;
+    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())
@@ -528,5 +529,84 @@ mod validation_tests {
             node.validate_with_page_id(expected_page_id),
             expected_page_id,
         );
+    }
+    #[test]
+    fn internal_node_encoded_len_accounts_for_page_id_width() {
+        let node = BPlusNode::Internal {
+            keys: vec![key("a".as_bytes())],
+            children: vec![PageId::new(1), PageId::new(2)],
+        };
+
+        // HEADER = 6
+        // key_count = 2
+        // key = 2 + 1
+        // children_count = 2
+        // 2 PageIds = 2 * 8
+        //
+        // Total = 6 + 2 + 3 + 2 + 16 = 29
+        assert_eq!(node.encoded_len().unwrap(), 29);
+    }
+    #[test]
+    fn internal_node_encoded_len_accounts_for_key_length() {
+        let node = BPlusNode::Internal {
+            keys: vec![key("abc".as_bytes()), key("abcdefgh".as_bytes())],
+            children: vec![PageId::new(1), PageId::new(2), PageId::new(3)],
+        };
+
+        // HEADER              = 6
+        // key_count           = 2
+        // key "abc"           = 2 + 3
+        // key "abcdefgh"      = 2 + 8
+        // children_count     = 2
+        // 3 PageIds           = 3 * 8
+        //
+        // Total = 6 + 2 + 5 + 10 + 2 + 24
+        //       = 49
+        assert_eq!(node.encoded_len().unwrap(), 49);
+    }
+    #[test]
+    fn internal_node_capacity_is_bounded_by_page_size() {
+        let key_count = 291;
+
+        let keys: Vec<Key> = (0..key_count)
+            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .collect();
+
+        let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
+
+        let node = BPlusNode::Internal { keys, children };
+
+        assert_eq!(node.encoded_len().unwrap(), 4092);
+        assert!(node.encoded_len().unwrap() <= PAGE_SIZE);
+    }
+    #[test]
+    fn internal_node_four_byte_key_capacity() {
+        let key_count = 291;
+
+        let keys: Vec<Key> = (0..key_count)
+            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .collect();
+
+        let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
+
+        let node = BPlusNode::Internal { keys, children };
+
+        assert_eq!(node.encoded_len().unwrap(), 4092);
+        assert!(node.encoded_len().unwrap() <= PAGE_SIZE);
+    }
+    #[test]
+    fn internal_node_four_byte_key_over_capacity() {
+        let key_count = 292;
+
+        let keys: Vec<Key> = (0..key_count)
+            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .collect();
+
+        let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
+
+        let node = BPlusNode::Internal { keys, children };
+
+        assert_eq!(node.encoded_len().unwrap(), 4106);
+        assert!(node.encoded_len().unwrap() > PAGE_SIZE);
     }
 }
