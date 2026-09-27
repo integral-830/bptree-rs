@@ -115,6 +115,33 @@ impl<S: NodeStore> BPlusTree<S> {
             }
         }
     }
+    fn find_leaf_path(
+        &self,
+        key: &Key,
+    ) -> Result<(Vec<PageId>, PageId, BPlusNode), BPlusTreeError<S::Error>> {
+        let mut page_id = self.root_page_id;
+        let mut ancestors = Vec::new();
+
+        loop {
+            let node = self.store.read_node(page_id)?;
+
+            match node {
+                BPlusNode::Internal { keys, children } => {
+                    debug_assert_eq!(children.len(), keys.len() + 1);
+
+                    ancestors.push(page_id);
+
+                    let child_index = keys.partition_point(|separator| separator <= key);
+
+                    page_id = children[child_index];
+                }
+
+                leaf @ BPlusNode::Leaf { .. } => {
+                    return Ok((ancestors, page_id, leaf));
+                }
+            }
+        }
+    }
     pub fn insert(
         &mut self,
         key: Key,
@@ -1343,5 +1370,219 @@ pub mod tree_tests {
                 (key("z"), record(2, 0)),
             ]
         );
+    }
+    #[test]
+    fn find_leaf_path_root_leaf() {
+        let store = MemoryNodeStore::new();
+        let tree = BPlusTree::new(store).unwrap();
+
+        let search_key = key("0001");
+
+        let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
+
+        assert!(ancestors.is_empty());
+        assert_eq!(leaf_page_id, tree.root_page_id);
+        assert!(matches!(node, BPlusNode::Leaf { .. }));
+    }
+
+    #[test]
+    fn find_leaf_path_one_internal_level() {
+        let mut store = MemoryNodeStore::new();
+
+        let left_leaf = BPlusNode::Leaf {
+            keys: vec![key("0001"), key("0002")],
+            values: vec![record(1, 1), record(1, 2)],
+            next_leaf: None,
+        };
+
+        let right_leaf = BPlusNode::Leaf {
+            keys: vec![key("0010"), key("0020")],
+            values: vec![record(2, 1), record(2, 2)],
+            next_leaf: None,
+        };
+
+        let left_page_id = store.allocate_node(&left_leaf).unwrap();
+        let right_page_id = store.allocate_node(&right_leaf).unwrap();
+
+        let root = BPlusNode::Internal {
+            keys: vec![key("0010")],
+            children: vec![left_page_id, right_page_id],
+        };
+
+        let root_page_id = store.allocate_node(&root).unwrap();
+
+        let tree = BPlusTree::from_root(store, root_page_id);
+
+        let search_key = key("0002");
+
+        let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
+
+        assert_eq!(ancestors, vec![root_page_id]);
+        assert_eq!(leaf_page_id, left_page_id);
+        assert!(matches!(node, BPlusNode::Leaf { .. }));
+    }
+
+    #[test]
+    fn find_leaf_path_routes_to_right_child() {
+        let mut store = MemoryNodeStore::new();
+
+        let left_leaf = BPlusNode::Leaf {
+            keys: vec![key("0001")],
+            values: vec![record(1, 1)],
+            next_leaf: None,
+        };
+
+        let right_leaf = BPlusNode::Leaf {
+            keys: vec![key("0010")],
+            values: vec![record(2, 1)],
+            next_leaf: None,
+        };
+
+        let left_page_id = store.allocate_node(&left_leaf).unwrap();
+        let right_page_id = store.allocate_node(&right_leaf).unwrap();
+
+        let root = BPlusNode::Internal {
+            keys: vec![key("0010")],
+            children: vec![left_page_id, right_page_id],
+        };
+
+        let root_page_id = store.allocate_node(&root).unwrap();
+
+        let tree = BPlusTree::from_root(store, root_page_id);
+
+        let search_key = key("0020");
+
+        let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
+
+        assert_eq!(ancestors, vec![root_page_id]);
+        assert_eq!(leaf_page_id, right_page_id);
+        assert!(matches!(node, BPlusNode::Leaf { .. }));
+    }
+
+    #[test]
+    fn find_leaf_path_separator_equality_routes_right() {
+        let mut store = MemoryNodeStore::new();
+
+        let left_leaf = BPlusNode::Leaf {
+            keys: vec![key("0001")],
+            values: vec![record(1, 1)],
+            next_leaf: None,
+        };
+
+        let right_leaf = BPlusNode::Leaf {
+            keys: vec![key("0010"), key("0020")],
+            values: vec![record(2, 1), record(2, 2)],
+            next_leaf: None,
+        };
+
+        let left_page_id = store.allocate_node(&left_leaf).unwrap();
+        let right_page_id = store.allocate_node(&right_leaf).unwrap();
+
+        let root = BPlusNode::Internal {
+            keys: vec![key("0010")],
+            children: vec![left_page_id, right_page_id],
+        };
+
+        let root_page_id = store.allocate_node(&root).unwrap();
+
+        let tree = BPlusTree::from_root(store, root_page_id);
+
+        // Separator equality must route to the right child.
+        let search_key = key("0010");
+
+        let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
+
+        assert_eq!(ancestors, vec![root_page_id]);
+        assert_eq!(leaf_page_id, right_page_id);
+        assert!(matches!(node, BPlusNode::Leaf { .. }));
+    }
+
+    #[test]
+    fn find_leaf_path_multiple_internal_levels() {
+        let mut store = MemoryNodeStore::new();
+
+        // Leaves:
+        //
+        // L1: [0001]
+        // L2: [0010]
+        // L3: [0020]
+        // L4: [0030]
+
+        let l1 = BPlusNode::Leaf {
+            keys: vec![key("0001")],
+            values: vec![record(1, 1)],
+            next_leaf: None,
+        };
+
+        let l2 = BPlusNode::Leaf {
+            keys: vec![key("0010")],
+            values: vec![record(2, 1)],
+            next_leaf: None,
+        };
+
+        let l3 = BPlusNode::Leaf {
+            keys: vec![key("0020")],
+            values: vec![record(3, 1)],
+            next_leaf: None,
+        };
+
+        let l4 = BPlusNode::Leaf {
+            keys: vec![key("0030")],
+            values: vec![record(4, 1)],
+            next_leaf: None,
+        };
+
+        let l1_page_id = store.allocate_node(&l1).unwrap();
+        let l2_page_id = store.allocate_node(&l2).unwrap();
+        let l3_page_id = store.allocate_node(&l3).unwrap();
+        let l4_page_id = store.allocate_node(&l4).unwrap();
+
+        // First internal node:
+        //
+        //       N1
+        //      /  \
+        //    L1   L2
+        let n1 = BPlusNode::Internal {
+            keys: vec![key("0010")],
+            children: vec![l1_page_id, l2_page_id],
+        };
+
+        let n1_page_id = store.allocate_node(&n1).unwrap();
+
+        // Second internal node:
+        //
+        //       N2
+        //      /  \
+        //    L3   L4
+        let n2 = BPlusNode::Internal {
+            keys: vec![key("0030")],
+            children: vec![l3_page_id, l4_page_id],
+        };
+
+        let n2_page_id = store.allocate_node(&n2).unwrap();
+
+        // Root:
+        //
+        //             ROOT
+        //            /    \
+        //          N1      N2
+        //         /  \    /  \
+        //        L1  L2  L3  L4
+        let root = BPlusNode::Internal {
+            keys: vec![key("0020")],
+            children: vec![n1_page_id, n2_page_id],
+        };
+
+        let root_page_id = store.allocate_node(&root).unwrap();
+
+        let tree = BPlusTree::from_root(store, root_page_id);
+
+        let search_key = key("0015");
+
+        let (ancestors, leaf_page_id, node) = tree.find_leaf_path(&search_key).unwrap();
+
+        assert_eq!(ancestors, vec![root_page_id, n1_page_id]);
+        assert_eq!(leaf_page_id, l2_page_id);
+        assert!(matches!(node, BPlusNode::Leaf { .. }));
     }
 }
