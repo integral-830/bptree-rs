@@ -352,12 +352,12 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
-    use crate::BPlusNode;
     use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
     use crate::slotted_page::PAGE_SIZE;
+    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())
@@ -608,5 +608,157 @@ mod validation_tests {
 
         assert_eq!(node.encoded_len().unwrap(), 4106);
         assert!(node.encoded_len().unwrap() > PAGE_SIZE);
+    }
+
+    #[test]
+    fn leaf_node_capacity_boundary() {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..10_000u64 {
+            let candidate_key = Key::new(format!("{i:08}").into_bytes());
+
+            let candidate_value = RecordId::new(PageId::new(i + 1), 0);
+
+            keys.push(candidate_key);
+            values.push(candidate_value);
+
+            let candidate = BPlusNode::Leaf {
+                keys: keys.clone(),
+                values: values.clone(),
+                next_leaf: None,
+            };
+
+            if candidate.encoded_len().unwrap() > PAGE_SIZE {
+                keys.pop();
+                values.pop();
+                break;
+            }
+        }
+
+        let node = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: None,
+        };
+
+        let encoded_len = node.encoded_len().unwrap();
+
+        assert!(encoded_len <= PAGE_SIZE);
+
+        /*
+         * Adding another entry must cross PAGE_SIZE.
+         */
+        let next_index = keys.len() as u64;
+
+        let mut overflowing_keys = keys;
+        let mut overflowing_values = values;
+
+        overflowing_keys.push(Key::new(format!("{next_index:08}").into_bytes()));
+
+        overflowing_values.push(RecordId::new(PageId::new(next_index + 1), 0));
+
+        let overflowing_node = BPlusNode::Leaf {
+            keys: overflowing_keys,
+            values: overflowing_values,
+            next_leaf: None,
+        };
+
+        assert!(overflowing_node.encoded_len().unwrap() > PAGE_SIZE);
+    }
+    #[test]
+    fn leaf_node_capacity_boundary_with_next_leaf() {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..10_000u64 {
+            let candidate_key = Key::new(format!("{i:08}").into_bytes());
+
+            let candidate_value = RecordId::new(PageId::new(i + 1), 0);
+
+            keys.push(candidate_key);
+            values.push(candidate_value);
+
+            let candidate = BPlusNode::Leaf {
+                keys: keys.clone(),
+                values: values.clone(),
+                next_leaf: Some(PageId::new(999)),
+            };
+
+            if candidate.encoded_len().unwrap() > PAGE_SIZE {
+                keys.pop();
+                values.pop();
+                break;
+            }
+        }
+
+        let node = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: Some(PageId::new(999)),
+        };
+
+        assert!(node.encoded_len().unwrap() <= PAGE_SIZE);
+
+        let next_index = keys.len() as u64;
+
+        let mut overflowing_keys = keys;
+        let mut overflowing_values = values;
+
+        overflowing_keys.push(Key::new(format!("{next_index:08}").into_bytes()));
+
+        overflowing_values.push(RecordId::new(PageId::new(next_index + 1), 0));
+
+        let overflowing_node = BPlusNode::Leaf {
+            keys: overflowing_keys,
+            values: overflowing_values,
+            next_leaf: Some(PageId::new(999)),
+        };
+
+        assert!(overflowing_node.encoded_len().unwrap() > PAGE_SIZE);
+    }
+    #[test]
+    fn internal_node_variable_key_capacity_boundary() {
+        let mut keys = Vec::new();
+        let mut children = Vec::new();
+
+        children.push(PageId::new(1));
+
+        for i in 0..10_000u64 {
+            let candidate_key = Key::new(format!("{i:08}-{}", "x".repeat(3)).into_bytes());
+
+            keys.push(candidate_key);
+            children.push(PageId::new(i + 2));
+
+            let candidate = BPlusNode::Internal {
+                keys: keys.clone(),
+                children: children.clone(),
+            };
+
+            if candidate.encoded_len().unwrap() > PAGE_SIZE {
+                keys.pop();
+                children.pop();
+                break;
+            }
+        }
+
+        let node = BPlusNode::Internal {
+            keys: keys.clone(),
+            children: children.clone(),
+        };
+
+        assert!(node.encoded_len().unwrap() <= PAGE_SIZE);
+
+        let next_index = keys.len() as u64;
+
+        keys.push(Key::new(
+            format!("{next_index:08}-{}", "x".repeat(3)).into_bytes(),
+        ));
+
+        children.push(PageId::new(next_index + 2));
+
+        let overflowing_node = BPlusNode::Internal { keys, children };
+
+        assert!(overflowing_node.encoded_len().unwrap() > PAGE_SIZE);
     }
 }

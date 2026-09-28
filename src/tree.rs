@@ -1,10 +1,10 @@
-use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
+use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -378,15 +378,15 @@ impl<S: NodeStore> BPlusTree<S> {
 
 #[cfg(test)]
 pub mod tree_tests {
-    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
     use crate::slotted_page::PAGE_SIZE;
-    use crate::storage::memory::MemoryNodeStore;
+    use crate::storage::memory::{MemoryNodeStore, MemoryNodeStoreError};
     use crate::tree::BPlusTree;
+    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -1818,114 +1818,6 @@ pub mod tree_tests {
                 assert_eq!(values, vec![record(1, 4), record(1, 5), record(1, 6),]);
 
                 assert_eq!(next_leaf, None);
-            }
-
-            BPlusNode::Internal { .. } => {
-                panic!("expected right leaf");
-            }
-        }
-    }
-    #[test]
-    fn split_leaf_preserves_key_value_alignment() {
-        let mut store = MemoryNodeStore::new();
-
-        let leaf = BPlusNode::Leaf {
-            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
-            values: vec![record(10, 1), record(10, 2), record(10, 3), record(10, 4)],
-            next_leaf: None,
-        };
-
-        let leaf_page_id = store.allocate_node(&leaf).unwrap();
-
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
-
-        let (right_page_id, separator) = tree
-            .split_leaf(
-                leaf_page_id,
-                vec![key("0001"), key("0002"), key("0003"), key("0004")],
-                vec![record(10, 1), record(10, 2), record(10, 3), record(10, 4)],
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(separator, key("0003"));
-
-        let (_, left_node) = tree.find_leaf(&key("0001")).unwrap();
-        let right_node = tree.store.read_node(right_page_id).unwrap();
-
-        match left_node {
-            BPlusNode::Leaf { keys, values, .. } => {
-                assert_eq!(keys, vec![key("0001"), key("0002")]);
-
-                assert_eq!(values, vec![record(10, 1), record(10, 2)]);
-            }
-
-            BPlusNode::Internal { .. } => {
-                panic!("expected left leaf");
-            }
-        }
-
-        match right_node {
-            BPlusNode::Leaf { keys, values, .. } => {
-                assert_eq!(keys, vec![key("0003"), key("0004")]);
-
-                assert_eq!(values, vec![record(10, 3), record(10, 4)]);
-            }
-
-            BPlusNode::Internal { .. } => {
-                panic!("expected right leaf");
-            }
-        }
-    }
-    #[test]
-    fn split_leaf_preserves_existing_next_leaf() {
-        let mut store = MemoryNodeStore::new();
-
-        let next_leaf = BPlusNode::Leaf {
-            keys: vec![key("0010")],
-            values: vec![record(2, 10)],
-            next_leaf: None,
-        };
-
-        let next_page_id = store.allocate_node(&next_leaf).unwrap();
-
-        let leaf = BPlusNode::Leaf {
-            keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
-            values: vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
-            next_leaf: Some(next_page_id),
-        };
-
-        let leaf_page_id = store.allocate_node(&leaf).unwrap();
-
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
-
-        let (right_page_id, separator) = tree
-            .split_leaf(
-                leaf_page_id,
-                vec![key("0001"), key("0002"), key("0003"), key("0004")],
-                vec![record(1, 1), record(1, 2), record(1, 3), record(1, 4)],
-                Some(next_page_id),
-            )
-            .unwrap();
-
-        assert_eq!(separator, key("0003"));
-
-        let left_node = tree.store.read_node(leaf_page_id).unwrap();
-        let right_node = tree.store.read_node(right_page_id).unwrap();
-
-        match left_node {
-            BPlusNode::Leaf { next_leaf, .. } => {
-                assert_eq!(next_leaf, Some(right_page_id));
-            }
-
-            BPlusNode::Internal { .. } => {
-                panic!("expected left leaf");
-            }
-        }
-
-        match right_node {
-            BPlusNode::Leaf { next_leaf, .. } => {
-                assert_eq!(next_leaf, Some(next_page_id));
             }
 
             BPlusNode::Internal { .. } => {
@@ -3699,5 +3591,1037 @@ pub mod tree_tests {
         }
 
         assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn split_leaf_results_fit_page_size() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..10_000u64 {
+            let candidate_key = key(&format!("{i:08}-{}", "x".repeat(20)));
+
+            keys.push(candidate_key);
+            values.push(RecordId::new(PageId::new(i + 1), 0));
+
+            let candidate = BPlusNode::Leaf {
+                keys: keys.clone(),
+                values: values.clone(),
+                next_leaf: None,
+            };
+
+            if candidate.encoded_len().unwrap() > PAGE_SIZE {
+                keys.pop();
+                values.pop();
+                break;
+            }
+        }
+
+        /*
+         * Make the candidate overflow.
+         */
+        keys.push(key(&format!("{:08}-{}", keys.len(), "y".repeat(20))));
+
+        values.push(RecordId::new(PageId::new(999_999), 0));
+
+        let original = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: None,
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, separator) = tree.split_leaf(page_id, keys, values, None).unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        assert!(left.encoded_len().unwrap() <= PAGE_SIZE);
+        assert!(right.encoded_len().unwrap() <= PAGE_SIZE);
+
+        assert!(left.validate().is_ok());
+        assert!(right.validate().is_ok());
+
+        let BPlusNode::Leaf {
+            keys: right_keys, ..
+        } = right
+        else {
+            panic!("right split node must be a leaf");
+        };
+
+        assert_eq!(separator, right_keys[0]);
+    }
+    #[test]
+    fn split_leaf_preserves_every_key_and_value_exactly() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let keys: Vec<Key> = (0..100).map(|i| key(&format!("{i:04}"))).collect();
+
+        let values: Vec<RecordId> = (0..100)
+            .map(|i| RecordId::new(PageId::new(i + 1), 0))
+            .collect();
+
+        let original = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: None,
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, separator) = tree
+            .split_leaf(page_id, keys.clone(), values.clone(), None)
+            .unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        let BPlusNode::Leaf {
+            keys: left_keys,
+            values: left_values,
+            next_leaf: left_next,
+        } = left
+        else {
+            panic!("left node must be leaf");
+        };
+
+        let BPlusNode::Leaf {
+            keys: right_keys,
+            values: right_values,
+            next_leaf: right_next,
+        } = right
+        else {
+            panic!("right node must be leaf");
+        };
+
+        let mut combined_keys = left_keys.clone();
+        combined_keys.extend(right_keys.clone());
+
+        let mut combined_values = left_values.clone();
+        combined_values.extend(right_values.clone());
+
+        assert_eq!(combined_keys, keys);
+        assert_eq!(combined_values, values);
+
+        assert_eq!(separator, right_keys[0]);
+
+        assert_eq!(left_next, Some(right_page_id));
+
+        assert_eq!(right_next, None);
+    }
+    #[test]
+    fn split_leaf_preserves_key_value_alignment() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
+
+        let values: Vec<RecordId> = (0..101)
+            .map(|i| RecordId::new(PageId::new(100_000 + i), i as u16))
+            .collect();
+
+        let original = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: None,
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, _) = tree.split_leaf(page_id, keys, values, None).unwrap();
+
+        for page in [page_id, right_page_id] {
+            let node = tree.store.read_node(page).unwrap();
+
+            let BPlusNode::Leaf { keys, values, .. } = node else {
+                panic!("expected leaf");
+            };
+
+            assert_eq!(keys.len(), values.len());
+
+            for (key_value, record_id) in keys.iter().zip(values.iter()) {
+                let key_number: usize = String::from_utf8(key_value.as_bytes().to_vec())
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+
+                assert_eq!(
+                    record_id.page_id(),
+                    PageId::new(100_000 + key_number as u64)
+                );
+
+                assert_eq!(record_id.slot_id(), key_number as u16);
+            }
+        }
+    }
+    #[test]
+    fn split_internal_preserves_every_child_exactly() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
+
+        let children: Vec<PageId> = (0..=101).map(|i| PageId::new(i + 10_000)).collect();
+
+        let original = BPlusNode::Internal {
+            keys: keys.clone(),
+            children: children.clone(),
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, promoted) = tree
+            .split_internal(page_id, keys.clone(), children.clone())
+            .unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        let BPlusNode::Internal {
+            keys: left_keys,
+            children: left_children,
+        } = left
+        else {
+            panic!("left node must be internal");
+        };
+
+        let BPlusNode::Internal {
+            keys: right_keys,
+            children: right_children,
+        } = right
+        else {
+            panic!("right node must be internal");
+        };
+
+        /*
+         * The promoted separator belongs to neither child.
+         */
+        assert!(!left_keys.contains(&promoted));
+
+        assert!(!right_keys.contains(&promoted));
+
+        /*
+         * Every original child must still exist exactly once.
+         */
+        let mut combined_children = left_children.clone();
+
+        combined_children.extend(right_children.clone());
+
+        assert_eq!(combined_children, children);
+    }
+    #[test]
+    fn split_internal_preserves_every_non_promoted_key() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
+
+        let children: Vec<PageId> = (0..=101).map(|i| PageId::new(i + 20_000)).collect();
+
+        let original = BPlusNode::Internal {
+            keys: keys.clone(),
+            children,
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, promoted) = tree
+            .split_internal(
+                page_id,
+                keys.clone(),
+                (0..=101).map(|i| PageId::new(i + 20_000)).collect(),
+            )
+            .unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        let BPlusNode::Internal {
+            keys: left_keys, ..
+        } = left
+        else {
+            panic!("expected internal");
+        };
+
+        let BPlusNode::Internal {
+            keys: right_keys, ..
+        } = right
+        else {
+            panic!("expected internal");
+        };
+
+        let mut combined = left_keys.clone();
+
+        combined.extend(right_keys.clone());
+
+        let expected: Vec<Key> = keys
+            .into_iter()
+            .filter(|key_value| key_value != &promoted)
+            .collect();
+
+        assert_eq!(combined, expected);
+    }
+    #[test]
+    fn split_internal_preserves_global_key_order() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
+
+        let children: Vec<PageId> = (0..=101).map(|i| PageId::new(i + 30_000)).collect();
+
+        let node = BPlusNode::Internal {
+            keys: keys.clone(),
+            children: children.clone(),
+        };
+
+        let page_id = tree.store.allocate_node(&node).unwrap();
+
+        let (right_page_id, promoted) = tree.split_internal(page_id, keys, children).unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        let BPlusNode::Internal {
+            keys: left_keys, ..
+        } = left
+        else {
+            panic!("expected internal");
+        };
+
+        let BPlusNode::Internal {
+            keys: right_keys, ..
+        } = right
+        else {
+            panic!("expected internal");
+        };
+
+        assert!(left_keys.windows(2).all(|pair| pair[0] < pair[1]));
+
+        assert!(right_keys.windows(2).all(|pair| pair[0] < pair[1]));
+
+        assert!(left_keys
+            .last()
+            .is_none_or(|key_value| key_value < &promoted));
+
+        assert!(right_keys
+            .first()
+            .is_none_or(|key_value| &promoted < key_value));
+    }
+    #[test]
+    fn split_leaf_preserves_existing_next_leaf() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let next_page_id = tree
+            .store
+            .allocate_node(&BPlusNode::Leaf {
+                keys: vec![key("zzzz")],
+                values: vec![RecordId::new(PageId::new(99_999), 0)],
+                next_leaf: None,
+            })
+            .unwrap();
+
+        let keys: Vec<Key> = (0..100).map(|i| key(&format!("{i:04}"))).collect();
+
+        let values: Vec<RecordId> = (0..100).map(|i| record_id(i)).collect();
+
+        let original = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: Some(next_page_id),
+        };
+
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        let (right_page_id, _) = tree
+            .split_leaf(page_id, keys, values, Some(next_page_id))
+            .unwrap();
+
+        let left = tree.store.read_node(page_id).unwrap();
+
+        let right = tree.store.read_node(right_page_id).unwrap();
+
+        let BPlusNode::Leaf {
+            next_leaf: left_next,
+            ..
+        } = left
+        else {
+            panic!("expected leaf");
+        };
+
+        let BPlusNode::Leaf {
+            next_leaf: right_next,
+            ..
+        } = right
+        else {
+            panic!("expected leaf");
+        };
+
+        assert_eq!(left_next, Some(right_page_id));
+
+        assert_eq!(right_next, Some(next_page_id));
+    }
+    #[test]
+    fn duplicate_keys_are_rejected_at_all_positions_after_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let duplicate_indices = [0, key_count / 2, key_count - 1];
+
+        for &i in &duplicate_indices {
+            let result = tree.insert(fixed_key(i), RecordId::new(PageId::new(999_999), 999));
+
+            assert!(
+                matches!(result, Err(BPlusTreeError::DuplicateKey)),
+                "duplicate key {i} was not rejected"
+            );
+
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+    #[test]
+    fn separator_equality_routes_to_right_leaf_after_split() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let count = 1_000;
+
+        for i in 0..count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), count);
+
+        for i in 0..count {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+    #[test]
+    fn separator_equality_routes_correctly_after_internal_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        /*
+         * Check many likely separator positions.
+         */
+        let positions = [
+            100, 500, 1_000, 2_500, 5_000, 7_500, 10_000, 12_500, 15_000, 17_500, 19_000,
+        ];
+
+        for &i in &positions {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+    #[test]
+    fn interleaved_insertions_preserve_sorted_scan() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        for i in (0..10_000).step_by(2) {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        for i in (1..10_000).step_by(2) {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), 10_000);
+
+        for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &fixed_key(i));
+
+            assert_eq!(*actual_record, record_id(i));
+        }
+    }
+    #[test]
+    fn duplicate_insert_does_not_modify_tree_after_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let before = tree.scan().unwrap();
+
+        let duplicate_key = fixed_key(5_000);
+
+        let result = tree.insert(duplicate_key, RecordId::new(PageId::new(777_777), 777));
+
+        assert!(matches!(result, Err(BPlusTreeError::DuplicateKey)));
+
+        let after = tree.scan().unwrap();
+
+        assert_eq!(before, after);
+    }
+    #[test]
+    fn insert_before_existing_separator_preserves_routing() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        /*
+         * First insert all even keys.
+         *
+         * key 0 -> record_id(0)
+         * key 2 -> record_id(2)
+         * key 4 -> record_id(4)
+         * ...
+         */
+        for i in 0..10_000usize {
+            let key_number = i * 2;
+
+            tree.insert(fixed_key(key_number), record_id(key_number))
+                .unwrap();
+        }
+
+        /*
+         * Now insert all odd keys between the existing keys.
+         *
+         * key 1 -> record_id(1)
+         * key 3 -> record_id(3)
+         * key 5 -> record_id(5)
+         * ...
+         */
+        for i in 0..10_000usize {
+            let key_number = i * 2 + 1;
+
+            tree.insert(fixed_key(key_number), record_id(key_number))
+                .unwrap();
+        }
+
+        /*
+         * The final key space is:
+         *
+         * 0, 1, 2, 3, 4, 5, ..., 19_999
+         *
+         * Every key must map to its corresponding record.
+         */
+        for key_number in 0..20_000usize {
+            assert_eq!(
+                tree.search(&fixed_key(key_number)).unwrap(),
+                Some(record_id(key_number)),
+                "search failed for key {key_number}",
+            );
+        }
+
+        /*
+         * Scan must contain every key exactly once and remain
+         * globally sorted.
+         */
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), 20_000);
+
+        for (index, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(
+                actual_key,
+                &fixed_key(index),
+                "unexpected key at scan position {index}",
+            );
+
+            assert_eq!(
+                *actual_record,
+                record_id(index),
+                "unexpected record at scan position {index}",
+            );
+        }
+
+        /*
+         * Final structural validation.
+         */
+        assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn randomized_insertion_order_preserves_tree_correctness() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        /*
+         * Generate a deterministic permutation.
+         *
+         * The multiplication produces a different insertion order
+         * while remaining completely reproducible.
+         */
+        let mut order: Vec<usize> = (0..key_count).collect();
+
+        order.sort_by_key(|value| value.wrapping_mul(7_919) % key_count);
+
+        /*
+         * Insert according to the permutation.
+         */
+        for &i in &order {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        /*
+         * Every key must be searchable.
+         */
+        for i in 0..key_count {
+            assert_eq!(
+                tree.search(&fixed_key(i)).unwrap(),
+                Some(record_id(i)),
+                "missing key {i}",
+            );
+        }
+
+        /*
+         * Scan must return keys in sorted order regardless
+         * of insertion order.
+         */
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &fixed_key(i), "wrong key at scan position {i}",);
+
+            assert_eq!(
+                *actual_record,
+                record_id(i),
+                "wrong record at scan position {i}",
+            );
+        }
+
+        /*
+         * Validate the complete reachable tree.
+         */
+        assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn reverse_order_insertion_preserves_tree_correctness() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        for i in (0..key_count).rev() {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        for i in 0..key_count {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)),);
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &fixed_key(i));
+
+            assert_eq!(*actual_record, record_id(i));
+        }
+
+        assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn alternating_insertion_order_preserves_tree_correctness() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        let mut order = Vec::with_capacity(key_count);
+
+        let mut left = 0usize;
+        let mut right = key_count - 1;
+
+        while left <= right {
+            order.push(left);
+
+            if left == right {
+                break;
+            }
+
+            order.push(right);
+
+            left += 1;
+            right -= 1;
+        }
+
+        for &i in &order {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &fixed_key(i));
+
+            assert_eq!(*actual_record, record_id(i));
+        }
+
+        assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn randomized_insertion_duplicate_detection() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        let mut order: Vec<usize> = (0..key_count).collect();
+
+        order.sort_by_key(|value| value.wrapping_mul(7_919) % key_count);
+
+        for &i in &order {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        /*
+         * Try duplicates in positions spread across the tree.
+         */
+        for i in [0, 1, 127, 1_000, 2_500, 5_000, 7_500, 9_999] {
+            let result = tree.insert(fixed_key(i), RecordId::new(PageId::new(999_999), 999));
+
+            assert!(
+                matches!(result, Err(BPlusTreeError::DuplicateKey)),
+                "duplicate key {i} was accepted"
+            );
+
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+
+    // Custom Failing test implementation.
+    #[derive(Debug)]
+    struct FailingNodeStore {
+        inner: MemoryNodeStore,
+        fail_writes_after: Option<usize>,
+        fail_allocations_after: Option<usize>,
+    }
+    impl NodeStore for FailingNodeStore {
+        type Error = MemoryNodeStoreError;
+
+        fn read_node(&self, page_id: PageId) -> Result<BPlusNode, Self::Error> {
+            self.inner.read_node(page_id)
+        }
+
+        fn write_node(&mut self, page_id: PageId, node: &BPlusNode) -> Result<(), Self::Error> {
+            if let Some(remaining) = self.fail_writes_after.as_mut() {
+                if *remaining == 0 {
+                    return Err(MemoryNodeStoreError::InvalidNode);
+                }
+
+                *remaining -= 1;
+            }
+
+            self.inner.write_node(page_id, node)
+        }
+
+        fn allocate_node(&mut self, node: &BPlusNode) -> Result<PageId, Self::Error> {
+            if let Some(remaining) = self.fail_allocations_after.as_mut() {
+                if *remaining == 0 {
+                    return Err(MemoryNodeStoreError::InvalidNode);
+                }
+
+                *remaining -= 1;
+            }
+
+            self.inner.allocate_node(node)
+        }
+    }
+    fn tree_snapshot<S: NodeStore>(tree: &BPlusTree<S>) -> Vec<(Key, RecordId)>
+    where
+        S::Error: std::fmt::Debug,
+    {
+        tree.scan().unwrap()
+    }
+    #[test]
+    fn failing_node_store_allows_normal_operations() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        tree.insert(fixed_key(1), record_id(1)).unwrap();
+
+        assert_eq!(tree.search(&fixed_key(1)).unwrap(), Some(record_id(1)));
+    }
+    #[test]
+    fn insert_propagates_allocation_failure() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: Some(0),
+        };
+
+        let mut tree = BPlusTree::new(store);
+
+        assert!(tree.is_err());
+    }
+    #[test]
+    fn insert_propagates_write_failure() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        for i in 0..100 {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        tree.store.fail_writes_after = Some(0);
+
+        let result = tree.insert(fixed_key(101), record_id(101));
+
+        assert!(result.is_err());
+    }
+    #[test]
+    fn failed_leaf_split_is_detectable() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        for i in 0..10_000 {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let before = tree_snapshot(&tree);
+
+        /*
+         * Force the next write to fail.
+         */
+        tree.store.fail_writes_after = Some(0);
+
+        let result = tree.insert(fixed_key(10_001), record_id(10_001));
+
+        assert!(result.is_err());
+
+        /*
+         * We deliberately don't assert equality yet.
+         *
+         * This test establishes whether the current implementation
+         * leaves the tree unchanged or partially modified.
+         */
+        let after = tree_snapshot(&tree);
+
+        println!("before entries: {}", before.len());
+
+        println!("after entries: {}", after.len());
+    }
+    #[test]
+    fn failed_parent_update_is_detectable() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        /*
+         * Force the first root leaf split.
+         */
+        for i in 0..5_000 {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let before = tree_snapshot(&tree);
+
+        /*
+         * The next write should fail.
+         */
+        tree.store.fail_writes_after = Some(0);
+
+        let result = tree.insert(fixed_key(5_001), record_id(5_001));
+
+        assert!(result.is_err());
+        let after = tree_snapshot(&tree);
+
+        assert_eq!(
+            before, after,
+            "failed parent update left the tree partially modified"
+        );
+
+        let after = tree_snapshot(&tree);
+
+        println!("before entries: {}", before.len());
+
+        println!("after entries: {}", after.len());
+    }
+    #[test]
+    fn failed_split_allocation_does_not_modify_original_leaf() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        /*
+         * Construct a leaf large enough to represent the
+         * pre-split state.
+         */
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+
+        for i in 0..10_000u64 {
+            let candidate_key = key(&format!("{i:08}-{}", "x".repeat(20)));
+
+            let candidate_value = RecordId::new(PageId::new(i + 1), 0);
+
+            keys.push(candidate_key);
+            values.push(candidate_value);
+
+            let candidate = BPlusNode::Leaf {
+                keys: keys.clone(),
+                values: values.clone(),
+                next_leaf: None,
+            };
+
+            if candidate.encoded_len().unwrap() > PAGE_SIZE {
+                keys.pop();
+                values.pop();
+                break;
+            }
+        }
+
+        /*
+         * Add one more entry so the input represents the
+         * overflowing leaf that split_leaf() expects.
+         */
+        let overflow_index = keys.len() as u64;
+
+        keys.push(key(&format!("{overflow_index:08}-{}", "y".repeat(20))));
+
+        values.push(RecordId::new(PageId::new(100_000), 0));
+
+        /*
+         * The caller of split_leaf() must already own an
+         * allocated page.
+         */
+        let original = BPlusNode::Leaf {
+            keys: keys.clone(),
+            values: values.clone(),
+            next_leaf: None,
+        };
+
+        /*
+         * Make sure the constructed node is valid.
+         */
+        assert!(original.validate().is_ok());
+
+        /*
+         * Store the overflowing leaf before enabling
+         * allocation failure.
+         */
+        let page_id = tree.store.allocate_node(&original).unwrap();
+
+        /*
+         * Capture the original state.
+         */
+        let before = tree.store.read_node(page_id).unwrap();
+
+        /*
+         * The next allocation must fail.
+         */
+        tree.store.fail_allocations_after = Some(0);
+
+        let result = tree.split_leaf(page_id, keys, values, None);
+
+        assert!(
+            result.is_err(),
+            "split_leaf should propagate allocation failure"
+        );
+
+        /*
+         * Allocation happens before the original page is
+         * rewritten in split_leaf().
+         *
+         * Therefore the original leaf must remain unchanged.
+         */
+        let after = tree.store.read_node(page_id).unwrap();
+
+        assert_eq!(
+            before, after,
+            "allocation failure modified the original leaf"
+        );
+    }
+    #[test]
+    fn failed_insert_preserves_existing_search_results() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: None,
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 5_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        tree.store.fail_writes_after = Some(0);
+
+        let result = tree.insert(fixed_key(key_count + 1), record_id(key_count + 1));
+
+        assert!(result.is_err());
+
+        /*
+         * Existing records must remain searchable.
+         */
+        for i in 0..key_count {
+            assert_eq!(
+                tree.search(&fixed_key(i)).unwrap(),
+                Some(record_id(i)),
+                "existing key {i} disappeared after failed insert",
+            );
+        }
+    }
+    #[test]
+    fn failed_insert_never_reports_success() {
+        let store = FailingNodeStore {
+            inner: MemoryNodeStore::new(),
+            fail_writes_after: Some(0),
+            fail_allocations_after: None,
+        };
+
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let result = tree.insert(fixed_key(1), record_id(1));
+
+        assert!(result.is_err());
     }
 }
