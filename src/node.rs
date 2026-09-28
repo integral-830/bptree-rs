@@ -352,12 +352,12 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
+    use crate::BPlusNode;
     use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
     use crate::slotted_page::PAGE_SIZE;
-    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())
