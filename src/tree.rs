@@ -1,10 +1,10 @@
+use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
-use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -378,6 +378,7 @@ impl<S: NodeStore> BPlusTree<S> {
 
 #[cfg(test)]
 pub mod tree_tests {
+    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
@@ -386,7 +387,6 @@ pub mod tree_tests {
     use crate::slotted_page::PAGE_SIZE;
     use crate::storage::memory::MemoryNodeStore;
     use crate::tree::BPlusTree;
-    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -394,6 +394,56 @@ pub mod tree_tests {
 
     fn record(page_id: u64, slot_id: u16) -> RecordId {
         RecordId::new(PageId::new(page_id), slot_id)
+    }
+    fn fixed_key(i: usize) -> Key {
+        key(&format!("{i:08}-{}", "x".repeat(8)))
+    }
+
+    fn record_id(i: usize) -> RecordId {
+        RecordId::new(PageId::new(i as u64 + 1_000_000), 0)
+    }
+
+    fn assert_node_valid<S: NodeStore>(tree: &BPlusTree<S>, page_id: PageId)
+    where
+        S::Error: std::fmt::Debug,
+    {
+        let node = tree.store.read_node(page_id).unwrap();
+
+        assert!(
+            node.validate().is_ok(),
+            "invalid node at page {:?}",
+            page_id
+        );
+
+        assert!(
+            node.encoded_len().unwrap() <= PAGE_SIZE,
+            "node exceeds PAGE_SIZE at page {:?}",
+            page_id
+        );
+
+        match node {
+            BPlusNode::Leaf { keys, values, .. } => {
+                assert_eq!(keys.len(), values.len());
+
+                assert!(
+                    keys.windows(2).all(|pair| pair[0] < pair[1]),
+                    "leaf keys are not strictly sorted"
+                );
+            }
+
+            BPlusNode::Internal { keys, children } => {
+                assert_eq!(children.len(), keys.len() + 1);
+
+                assert!(
+                    keys.windows(2).all(|pair| pair[0] < pair[1]),
+                    "internal keys are not strictly sorted"
+                );
+
+                for child_page_id in children {
+                    assert_node_valid(tree, child_page_id);
+                }
+            }
+        }
     }
 
     #[test]
@@ -3393,5 +3443,261 @@ pub mod tree_tests {
             assert_eq!(current_key, &key(&format!("{index:05}")));
             assert_eq!(*record_id, RecordId::new(PageId::new(index as u64 + 1), 0));
         }
+    }
+    #[test]
+    fn insert_large_tree_preserves_node_invariants() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        assert_node_valid(&tree, tree.root_page_id);
+    }
+    #[test]
+    fn insert_multiple_splits_preserve_search() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let checkpoints = [0, 1, 10, 100, 1_000, 5_000, 10_000, 15_000, 19_000, 19_999];
+
+        for &i in &checkpoints {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+    #[test]
+    fn insert_multiple_splits_preserve_scan_order() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &fixed_key(i));
+
+            assert_eq!(*actual_record, record_id(i));
+        }
+    }
+    #[test]
+    fn insert_multiple_splits_preserve_leaf_chain() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        /*
+         * Find the left-most leaf.
+         */
+        let mut page_id = tree.root_page_id;
+
+        loop {
+            let node = tree.store.read_node(page_id).unwrap();
+
+            match node {
+                BPlusNode::Internal { children, .. } => {
+                    page_id = children[0];
+                }
+
+                BPlusNode::Leaf { .. } => {
+                    break;
+                }
+            }
+        }
+
+        /*
+         * Follow next_leaf until the end.
+         */
+        let mut previous_key: Option<Key> = None;
+        let mut record_count = 0usize;
+
+        loop {
+            let node = tree.store.read_node(page_id).unwrap();
+
+            let BPlusNode::Leaf {
+                keys,
+                values,
+                next_leaf,
+            } = node
+            else {
+                panic!("leaf chain pointed to a non-leaf node");
+            };
+
+            assert_eq!(keys.len(), values.len());
+
+            for current_key in &keys {
+                if let Some(previous) = &previous_key {
+                    assert!(previous < current_key, "leaf chain is not strictly sorted");
+                }
+
+                previous_key = Some(current_key.clone());
+
+                record_count += 1;
+            }
+
+            match next_leaf {
+                Some(next_page_id) => {
+                    page_id = next_page_id;
+                }
+
+                None => break,
+            }
+        }
+
+        assert_eq!(record_count, key_count);
+    }
+    #[test]
+    fn duplicate_key_is_rejected_after_multiple_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let duplicate_key = fixed_key(10_000);
+
+        let result = tree.insert(
+            duplicate_key.clone(),
+            RecordId::new(PageId::new(999_999), 0),
+        );
+
+        assert!(matches!(result, Err(BPlusTreeError::DuplicateKey)));
+
+        assert_eq!(
+            tree.search(&duplicate_key).unwrap(),
+            Some(record_id(10_000))
+        );
+    }
+    #[test]
+    fn missing_keys_remain_absent_after_multiple_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let missing_keys = [
+            key("00000000-yyyyyyyy"),
+            key("00000001-yyyyyyyy"),
+            key("00005000-yyyyyyyy"),
+            key("00010000-yyyyyyyy"),
+            key("99999999-yyyyyyyy"),
+        ];
+
+        for missing_key in &missing_keys {
+            assert_eq!(tree.search(missing_key).unwrap(), None);
+        }
+    }
+    #[test]
+    fn root_remains_valid_after_multiple_splits() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let root = tree.store.read_node(tree.root_page_id).unwrap();
+
+        assert!(root.validate().is_ok());
+
+        assert!(root.encoded_len().unwrap() <= PAGE_SIZE);
+
+        match root {
+            BPlusNode::Leaf { keys, values, .. } => {
+                assert_eq!(keys.len(), values.len());
+            }
+
+            BPlusNode::Internal { keys, children } => {
+                assert_eq!(children.len(), keys.len() + 1);
+            }
+        }
+    }
+    #[test]
+    fn large_tree_contains_exactly_all_records() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 20_000;
+
+        for i in 0..key_count {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for i in 0..key_count {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+    }
+    #[test]
+    fn shuffled_insertions_preserve_tree_correctness() {
+        let store = MemoryNodeStore::new();
+        let mut tree = BPlusTree::new(store).unwrap();
+
+        let key_count = 10_000;
+
+        /*
+         * Deterministic permutation.
+         *
+         * This avoids depending on an external RNG.
+         */
+        let mut order = Vec::with_capacity(key_count);
+
+        for i in 0..key_count {
+            order.push(i);
+        }
+
+        order.sort_by_key(|i| (i.wrapping_mul(7_919)) % key_count);
+
+        for &i in &order {
+            tree.insert(fixed_key(i), record_id(i)).unwrap();
+        }
+
+        for i in 0..key_count {
+            assert_eq!(tree.search(&fixed_key(i)).unwrap(), Some(record_id(i)));
+        }
+
+        let entries = tree.scan().unwrap();
+
+        assert_eq!(entries.len(), key_count);
+
+        for (i, (key_value, record)) in entries.iter().enumerate() {
+            assert_eq!(key_value, &fixed_key(i));
+
+            assert_eq!(*record, record_id(i));
+        }
+
+        assert_node_valid(&tree, tree.root_page_id);
     }
 }

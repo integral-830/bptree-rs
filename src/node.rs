@@ -352,12 +352,12 @@ mod node_tests {
 
 #[cfg(test)]
 mod validation_tests {
+    use crate::BPlusNode;
     use crate::error::BPlusNodeError;
     use crate::key::Key;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
     use crate::slotted_page::PAGE_SIZE;
-    use crate::BPlusNode;
 
     fn key(bytes: &[u8]) -> Key {
         Key::new(bytes.to_vec())
@@ -569,7 +569,7 @@ mod validation_tests {
         let key_count = 291;
 
         let keys: Vec<Key> = (0..key_count)
-            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .map(|i| key(format!("{i:04}").as_bytes()))
             .collect();
 
         let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
@@ -584,7 +584,7 @@ mod validation_tests {
         let key_count = 291;
 
         let keys: Vec<Key> = (0..key_count)
-            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .map(|i| key(format!("{i:04}").as_bytes()))
             .collect();
 
         let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
@@ -599,7 +599,7 @@ mod validation_tests {
         let key_count = 292;
 
         let keys: Vec<Key> = (0..key_count)
-            .map(|i| key(&format!("{i:04}").as_bytes()))
+            .map(|i| key(format!("{i:04}").as_bytes()))
             .collect();
 
         let children: Vec<PageId> = (0..=key_count).map(PageId::new).collect();
