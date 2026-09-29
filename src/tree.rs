@@ -1,10 +1,10 @@
+use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
-use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -34,7 +34,7 @@ impl<S: NodeStore> BPlusTree<S> {
         loop {
             let node = self.store.read_node(page_id)?;
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { children, .. } => {
                     let Some(&first_child) = children.first() else {
                         return Err(BPlusTreeError::InvalidTreeState(
@@ -54,17 +54,17 @@ impl<S: NodeStore> BPlusTree<S> {
         loop {
             let node = self.store.read_node(page_id)?;
 
-            match node {
+            match &*node {
                 BPlusNode::Leaf {
                     keys,
                     values,
                     next_leaf,
                 } => {
-                    entries.extend(keys.into_iter().zip(values));
+                    entries.extend(keys.clone().into_iter().zip(values.clone()));
 
                     match next_leaf {
                         Some(next_page_id) => {
-                            page_id = next_page_id;
+                            page_id = *next_page_id;
                         }
                         None => break,
                     }
@@ -100,7 +100,7 @@ impl<S: NodeStore> BPlusTree<S> {
         loop {
             let node = self.store.read_node(page_id)?;
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { keys, children } => {
                     debug_assert_eq!(children.len(), keys.len() + 1);
 
@@ -110,7 +110,7 @@ impl<S: NodeStore> BPlusTree<S> {
                 }
 
                 leaf @ BPlusNode::Leaf { .. } => {
-                    return Ok((page_id, leaf));
+                    return Ok((page_id, leaf.clone()));
                 }
             }
         }
@@ -125,7 +125,7 @@ impl<S: NodeStore> BPlusTree<S> {
         loop {
             let node = self.store.read_node(page_id)?;
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { keys, children } => {
                     debug_assert_eq!(children.len(), keys.len() + 1);
 
@@ -137,7 +137,7 @@ impl<S: NodeStore> BPlusTree<S> {
                 }
 
                 leaf @ BPlusNode::Leaf { .. } => {
-                    return Ok((ancestors, page_id, leaf));
+                    return Ok((ancestors, page_id, leaf.clone()));
                 }
             }
         }
@@ -182,7 +182,7 @@ impl<S: NodeStore> BPlusTree<S> {
             next_leaf: Some(right_page_id),
         };
 
-        self.store.write_node(page_id, &left_leaf)?;
+        let _lock = self.store.write_node(page_id, &left_leaf)?;
 
         Ok((right_page_id, separator))
     }
@@ -234,7 +234,7 @@ impl<S: NodeStore> BPlusTree<S> {
 
         let right_page_id = self.store.allocate_node(&right_node)?;
 
-        self.store.write_node(page_id, &left_node)?;
+        let _lock = self.store.write_node(page_id, &left_node)?;
 
         Ok((right_page_id, promoted_key))
     }
@@ -278,7 +278,7 @@ impl<S: NodeStore> BPlusTree<S> {
 
         // Leaf still fits. No split required.
         if encoded_len <= PAGE_SIZE {
-            self.store.write_node(page_id, &updated_leaf)?;
+            let _lock = self.store.write_node(page_id, &updated_leaf)?;
             return Ok(());
         }
 
@@ -292,16 +292,20 @@ impl<S: NodeStore> BPlusTree<S> {
 
         // Process ancestors from the leaf's parent toward the root.
         for &parent_page_id in ancestors.iter().rev() {
-            let node = self.store.read_node(parent_page_id)?;
+            let (mut keys, mut children) = {
+                let node = self.store.read_node(parent_page_id)?;
 
-            let BPlusNode::Internal {
-                mut keys,
-                mut children,
-            } = node
-            else {
-                return Err(BPlusTreeError::InvalidTreeState(
-                    "ancestor page is not an internal node",
-                ));
+                let BPlusNode::Internal {
+                    keys: existing_keys,
+                    children: existing_children,
+                } = &*node
+                else {
+                    return Err(BPlusTreeError::InvalidTreeState(
+                        "parent page is not an internal node",
+                    ));
+                };
+
+                (existing_keys.clone(), existing_children.clone())
             };
 
             debug_assert_eq!(children.len(), keys.len() + 1);
@@ -332,7 +336,7 @@ impl<S: NodeStore> BPlusTree<S> {
 
             // Parent still fits. We are finished propagating.
             if parent_encoded_len <= PAGE_SIZE {
-                self.store.write_node(parent_page_id, &updated_parent)?;
+                let _lock = self.store.write_node(parent_page_id, &updated_parent)?;
                 return Ok(());
             }
 
@@ -378,15 +382,17 @@ impl<S: NodeStore> BPlusTree<S> {
 
 #[cfg(test)]
 pub mod tree_tests {
+    use parking_lot::Mutex;
+
+    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
-    use crate::node_store::NodeStore;
+    use crate::node_store::{NodeStore, ReadGuard, WriteGuard};
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
     use crate::slotted_page::PAGE_SIZE;
     use crate::storage::memory::{MemoryNodeStore, MemoryNodeStoreError};
     use crate::tree::BPlusTree;
-    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -421,7 +427,7 @@ pub mod tree_tests {
             page_id
         );
 
-        match node {
+        match &*node {
             BPlusNode::Leaf { keys, values, .. } => {
                 assert_eq!(keys.len(), values.len());
 
@@ -440,7 +446,7 @@ pub mod tree_tests {
                 );
 
                 for child_page_id in children {
-                    assert_node_valid(tree, child_page_id);
+                    assert_node_valid(tree, *child_page_id);
                 }
             }
         }
@@ -555,8 +561,9 @@ pub mod tree_tests {
             next_leaf: Some(right_leaf_id),
         };
 
-        store.write_node(left_leaf_id, &left_leaf).unwrap();
+        let lock = store.write_node(left_leaf_id, &left_leaf).unwrap();
 
+        drop(lock);
         let root = BPlusNode::Internal {
             keys: vec![key("c")],
             children: vec![left_leaf_id, right_leaf_id],
@@ -1807,17 +1814,17 @@ pub mod tree_tests {
             }
         }
 
-        match right_node {
+        match &*right_node {
             BPlusNode::Leaf {
                 keys,
                 values,
                 next_leaf,
             } => {
-                assert_eq!(keys, vec![key("0004"), key("0005"), key("0006")]);
+                assert_eq!(keys, &vec![key("0004"), key("0005"), key("0006")]);
 
-                assert_eq!(values, vec![record(1, 4), record(1, 5), record(1, 6),]);
+                assert_eq!(values, &vec![record(1, 4), record(1, 5), record(1, 6),]);
 
-                assert_eq!(next_leaf, None);
+                assert_eq!(next_leaf, &None);
             }
 
             BPlusNode::Internal { .. } => {
@@ -1853,9 +1860,9 @@ pub mod tree_tests {
         let left_node = tree.store.read_node(leaf_page_id).unwrap();
         let right_node = tree.store.read_node(right_page_id).unwrap();
 
-        match left_node {
+        match &*left_node {
             BPlusNode::Leaf { next_leaf, .. } => {
-                assert_eq!(next_leaf, Some(right_page_id));
+                assert_eq!(next_leaf, &Some(right_page_id));
             }
 
             BPlusNode::Internal { .. } => {
@@ -1863,9 +1870,9 @@ pub mod tree_tests {
             }
         }
 
-        match right_node {
+        match &*right_node {
             BPlusNode::Leaf { next_leaf, .. } => {
-                assert_eq!(next_leaf, None);
+                assert_eq!(next_leaf, &None);
             }
 
             BPlusNode::Internal { .. } => {
@@ -1926,7 +1933,7 @@ pub mod tree_tests {
 
         let right_node = tree.store.read_node(right_page_id).unwrap();
 
-        match right_node {
+        match &*right_node {
             BPlusNode::Leaf { keys, .. } => {
                 assert_eq!(separator, keys[0]);
                 assert_eq!(separator, key("0040"));
@@ -1964,9 +1971,9 @@ pub mod tree_tests {
 
         let left_node = tree.store.read_node(leaf_page_id).unwrap();
 
-        match left_node {
+        match &*left_node {
             BPlusNode::Leaf { keys, .. } => {
-                assert_eq!(keys, vec![key("0001"), key("0002")]);
+                assert_eq!(keys, &vec![key("0001"), key("0002")]);
             }
 
             BPlusNode::Internal { .. } => {
@@ -2028,7 +2035,7 @@ pub mod tree_tests {
         let left_node = tree.store.read_node(leaf_page_id).unwrap();
         let right_node = tree.store.read_node(right_page_id).unwrap();
 
-        let (left_keys, right_keys) = match (left_node, right_node) {
+        let (left_keys, right_keys) = match (&*left_node, &*right_node) {
             (
                 BPlusNode::Leaf {
                     keys: left_keys, ..
@@ -2073,7 +2080,7 @@ pub mod tree_tests {
             if i > 0 {
                 let node = tree.store.read_node(tree.root_page_id).unwrap();
 
-                if matches!(node, BPlusNode::Internal { .. }) {
+                if matches!(&*node, BPlusNode::Internal { .. }) {
                     break;
                 }
             }
@@ -2081,7 +2088,7 @@ pub mod tree_tests {
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        match root {
+        match &*root {
             BPlusNode::Internal { keys, children } => {
                 assert_eq!(keys.len(), 1);
                 assert_eq!(children.len(), 2);
@@ -2109,7 +2116,7 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
@@ -2130,7 +2137,7 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
@@ -2149,14 +2156,14 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if let BPlusNode::Internal { .. } = root {
+            if let BPlusNode::Internal { .. } = &*root {
                 break;
             }
         }
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let left_page_id = match root {
+        let left_page_id = match &*root {
             BPlusNode::Internal { children, .. } => children[0],
             BPlusNode::Leaf { .. } => {
                 panic!("root should be internal");
@@ -2167,7 +2174,7 @@ pub mod tree_tests {
 
         let left = tree.store.read_node(left_page_id).unwrap();
 
-        assert!(matches!(left, BPlusNode::Leaf { .. }));
+        assert!(matches!(&*left, BPlusNode::Leaf { .. }));
     }
     #[test]
     fn insert_root_split_creates_two_leaf_children() {
@@ -2179,14 +2186,14 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let children = match root {
+        let children = match &*root {
             BPlusNode::Internal { children, .. } => children,
 
             BPlusNode::Leaf { .. } => {
@@ -2197,9 +2204,9 @@ pub mod tree_tests {
         assert_eq!(children.len(), 2);
 
         for child_page_id in children {
-            let child = tree.store.read_node(child_page_id).unwrap();
+            let child = tree.store.read_node(*child_page_id).unwrap();
 
-            assert!(matches!(child, BPlusNode::Leaf { .. }));
+            assert!(matches!(&*child, BPlusNode::Leaf { .. }));
         }
     }
     #[test]
@@ -2212,14 +2219,14 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let (separator, right_page_id) = match root {
+        let (separator, right_page_id) = match &*root {
             BPlusNode::Internal { keys, children } => {
                 assert_eq!(keys.len(), 1);
                 assert_eq!(children.len(), 2);
@@ -2234,7 +2241,7 @@ pub mod tree_tests {
 
         let right = tree.store.read_node(right_page_id).unwrap();
 
-        match right {
+        match &*right {
             BPlusNode::Leaf { keys, .. } => {
                 assert!(!keys.is_empty());
                 assert_eq!(separator, keys[0]);
@@ -2255,14 +2262,14 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let children = match root {
+        let children = match &*root {
             BPlusNode::Internal { children, .. } => children,
 
             BPlusNode::Leaf { .. } => {
@@ -2272,7 +2279,7 @@ pub mod tree_tests {
 
         let left = tree.store.read_node(children[0]).unwrap();
 
-        let right_page_id = match left {
+        let right_page_id = match &*left {
             BPlusNode::Leaf { next_leaf, .. } => {
                 next_leaf.expect("left leaf should point to right leaf")
             }
@@ -2286,9 +2293,9 @@ pub mod tree_tests {
 
         let right = tree.store.read_node(right_page_id).unwrap();
 
-        match right {
+        match &*right {
             BPlusNode::Leaf { next_leaf, .. } => {
-                assert_eq!(next_leaf, None);
+                assert_eq!(next_leaf, &None);
             }
 
             BPlusNode::Internal { .. } => {
@@ -2313,7 +2320,7 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
@@ -2336,7 +2343,7 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
@@ -2357,14 +2364,14 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let separator = match root {
+        let separator = match &*root {
             BPlusNode::Internal { keys, .. } => keys[0].clone(),
 
             BPlusNode::Leaf { .. } => {
@@ -2423,16 +2430,16 @@ pub mod tree_tests {
         let right = tree.store.read_node(right_page_id).unwrap();
 
         assert_eq!(
-            left,
-            BPlusNode::Internal {
+            &*left,
+            &BPlusNode::Internal {
                 keys: vec![key("a"), key("b")],
                 children: vec![PageId::new(1), PageId::new(2), PageId::new(3),],
             }
         );
 
         assert_eq!(
-            right,
-            BPlusNode::Internal {
+            &*right,
+            &BPlusNode::Internal {
                 keys: vec![key("d"), key("e")],
                 children: vec![PageId::new(4), PageId::new(5), PageId::new(6),],
             }
@@ -2469,14 +2476,14 @@ pub mod tree_tests {
 
         let BPlusNode::Internal {
             keys: left_keys, ..
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
 
         let BPlusNode::Internal {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
@@ -2517,21 +2524,21 @@ pub mod tree_tests {
 
         let BPlusNode::Internal {
             keys: left_keys, ..
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
 
         let BPlusNode::Internal {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
 
-        let mut reconstructed_keys = left_keys;
+        let mut reconstructed_keys = left_keys.clone();
         reconstructed_keys.push(promoted_key);
-        reconstructed_keys.extend(right_keys);
+        reconstructed_keys.extend(right_keys.clone());
 
         assert_eq!(reconstructed_keys, keys);
     }
@@ -2569,7 +2576,7 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             children: left_children,
             ..
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
@@ -2577,12 +2584,12 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             children: right_children,
             ..
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
 
-        let mut reconstructed_children = left_children;
+        let mut reconstructed_children = left_children.clone();
         reconstructed_children.extend(right_children);
 
         assert_eq!(reconstructed_children, children);
@@ -2619,7 +2626,7 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             keys: left_keys,
             children: left_children,
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
@@ -2627,7 +2634,7 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             keys: right_keys,
             children: right_children,
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
@@ -2667,14 +2674,14 @@ pub mod tree_tests {
 
         let BPlusNode::Internal {
             keys: left_keys, ..
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
 
         let BPlusNode::Internal {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
@@ -2716,8 +2723,8 @@ pub mod tree_tests {
         let left = tree.store.read_node(page_id).unwrap();
 
         assert_eq!(
-            left,
-            BPlusNode::Internal {
+            &*left,
+            &BPlusNode::Internal {
                 keys: vec![key("a"), key("b")],
                 children: vec![PageId::new(1), PageId::new(2), PageId::new(3),],
             }
@@ -2754,8 +2761,8 @@ pub mod tree_tests {
         let right = tree.store.read_node(right_page_id).unwrap();
 
         assert_eq!(
-            right,
-            BPlusNode::Internal {
+            &*right,
+            &BPlusNode::Internal {
                 keys: vec![key("d"), key("e")],
                 children: vec![PageId::new(4), PageId::new(5), PageId::new(6),],
             }
@@ -2849,16 +2856,16 @@ pub mod tree_tests {
         let right = tree.store.read_node(right_page_id).unwrap();
 
         assert_eq!(
-            left,
-            BPlusNode::Internal {
+            &*left,
+            &BPlusNode::Internal {
                 keys: vec![key("a"), key("b")],
                 children: vec![PageId::new(1), PageId::new(2), PageId::new(3),],
             }
         );
 
         assert_eq!(
-            right,
-            BPlusNode::Internal {
+            &*right,
+            &BPlusNode::Internal {
                 keys: vec![key("d")],
                 children: vec![PageId::new(4), PageId::new(5),],
             }
@@ -2978,7 +2985,7 @@ pub mod tree_tests {
 
             let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-            if matches!(root, BPlusNode::Internal { .. }) {
+            if matches!(&*root, BPlusNode::Internal { .. }) {
                 break;
             }
         }
@@ -2987,7 +2994,7 @@ pub mod tree_tests {
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let BPlusNode::Internal { keys, children } = root else {
+        let BPlusNode::Internal { keys, children } = &*root else {
             panic!("root should be internal after leaf split");
         };
 
@@ -3012,7 +3019,7 @@ pub mod tree_tests {
             inserted.push((current_key, record_id));
 
             if matches!(
-                tree.store.read_node(tree.root_page_id).unwrap(),
+                &*tree.store.read_node(tree.root_page_id).unwrap(),
                 BPlusNode::Internal { .. }
             ) {
                 break;
@@ -3068,7 +3075,7 @@ pub mod tree_tests {
         loop {
             let node = tree.store.read_node(page_id).unwrap();
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { children, .. } => {
                     page_id = children[0];
                 }
@@ -3086,14 +3093,14 @@ pub mod tree_tests {
                 keys,
                 values,
                 next_leaf,
-            } = node
+            } = &*node
             else {
                 panic!("leaf chain contains an internal node");
             };
 
             assert_eq!(keys.len(), values.len());
 
-            for current_key in &keys {
+            for current_key in keys {
                 if let Some(previous_key) = &previous_key {
                     assert!(previous_key < current_key);
                 }
@@ -3104,7 +3111,7 @@ pub mod tree_tests {
 
             match next_leaf {
                 Some(next_page_id) => {
-                    page_id = next_page_id;
+                    page_id = *next_page_id;
                 }
                 None => break,
             }
@@ -3179,7 +3186,7 @@ pub mod tree_tests {
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let BPlusNode::Internal { keys, children } = root else {
+        let BPlusNode::Internal { keys, children } = &*root else {
             panic!("expected internal root");
         };
 
@@ -3208,10 +3215,10 @@ pub mod tree_tests {
 
             node.validate().unwrap();
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { children, .. } => {
                     for child_page_id in children {
-                        verify_node(tree, child_page_id);
+                        verify_node(tree, *child_page_id);
                     }
                 }
 
@@ -3283,7 +3290,7 @@ pub mod tree_tests {
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        assert!(matches!(root, BPlusNode::Internal { .. }));
+        assert!(matches!(&*root, BPlusNode::Internal { .. }));
     }
 
     #[test]
@@ -3300,14 +3307,14 @@ pub mod tree_tests {
 
         let root = tree.store.read_node(tree.root_page_id).unwrap();
 
-        let BPlusNode::Internal { keys, .. } = root else {
+        let BPlusNode::Internal { keys, .. } = &*root else {
             panic!("expected internal root");
         };
 
         assert!(!keys.is_empty());
 
         for separator in keys {
-            let result = tree.search(&separator).unwrap();
+            let result = tree.search(separator).unwrap();
 
             assert!(result.is_some());
         }
@@ -3406,7 +3413,7 @@ pub mod tree_tests {
         loop {
             let node = tree.store.read_node(page_id).unwrap();
 
-            match node {
+            match &*node {
                 BPlusNode::Internal { children, .. } => {
                     page_id = children[0];
                 }
@@ -3430,14 +3437,14 @@ pub mod tree_tests {
                 keys,
                 values,
                 next_leaf,
-            } = node
+            } = &*node
             else {
                 panic!("leaf chain pointed to a non-leaf node");
             };
 
             assert_eq!(keys.len(), values.len());
 
-            for current_key in &keys {
+            for current_key in keys {
                 if let Some(previous) = &previous_key {
                     assert!(previous < current_key, "leaf chain is not strictly sorted");
                 }
@@ -3449,7 +3456,7 @@ pub mod tree_tests {
 
             match next_leaf {
                 Some(next_page_id) => {
-                    page_id = next_page_id;
+                    page_id = *next_page_id;
                 }
 
                 None => break,
@@ -3523,7 +3530,7 @@ pub mod tree_tests {
 
         assert!(root.encoded_len().unwrap() <= PAGE_SIZE);
 
-        match root {
+        match &*root {
             BPlusNode::Leaf { keys, values, .. } => {
                 assert_eq!(keys.len(), values.len());
             }
@@ -3648,7 +3655,7 @@ pub mod tree_tests {
 
         let BPlusNode::Leaf {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("right split node must be a leaf");
         };
@@ -3685,7 +3692,7 @@ pub mod tree_tests {
             keys: left_keys,
             values: left_values,
             next_leaf: left_next,
-        } = left
+        } = &*left
         else {
             panic!("left node must be leaf");
         };
@@ -3694,7 +3701,7 @@ pub mod tree_tests {
             keys: right_keys,
             values: right_values,
             next_leaf: right_next,
-        } = right
+        } = &*right
         else {
             panic!("right node must be leaf");
         };
@@ -3710,9 +3717,9 @@ pub mod tree_tests {
 
         assert_eq!(separator, right_keys[0]);
 
-        assert_eq!(left_next, Some(right_page_id));
+        assert_eq!(left_next, &Some(right_page_id));
 
-        assert_eq!(right_next, None);
+        assert_eq!(right_next, &None);
     }
     #[test]
     fn split_leaf_preserves_key_value_alignment() {
@@ -3738,7 +3745,7 @@ pub mod tree_tests {
         for page in [page_id, right_page_id] {
             let node = tree.store.read_node(page).unwrap();
 
-            let BPlusNode::Leaf { keys, values, .. } = node else {
+            let BPlusNode::Leaf { keys, values, .. } = &*node else {
                 panic!("expected leaf");
             };
 
@@ -3785,7 +3792,7 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             keys: left_keys,
             children: left_children,
-        } = left
+        } = &*left
         else {
             panic!("left node must be internal");
         };
@@ -3793,7 +3800,7 @@ pub mod tree_tests {
         let BPlusNode::Internal {
             keys: right_keys,
             children: right_children,
-        } = right
+        } = &*right
         else {
             panic!("right node must be internal");
         };
@@ -3843,14 +3850,14 @@ pub mod tree_tests {
 
         let BPlusNode::Internal {
             keys: left_keys, ..
-        } = left
+        } = &*left
         else {
             panic!("expected internal");
         };
 
         let BPlusNode::Internal {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("expected internal");
         };
@@ -3889,14 +3896,14 @@ pub mod tree_tests {
 
         let BPlusNode::Internal {
             keys: left_keys, ..
-        } = left
+        } = &*left
         else {
             panic!("expected internal");
         };
 
         let BPlusNode::Internal {
             keys: right_keys, ..
-        } = right
+        } = &*right
         else {
             panic!("expected internal");
         };
@@ -3905,13 +3912,17 @@ pub mod tree_tests {
 
         assert!(right_keys.windows(2).all(|pair| pair[0] < pair[1]));
 
-        assert!(left_keys
-            .last()
-            .is_none_or(|key_value| key_value < &promoted));
+        assert!(
+            left_keys
+                .last()
+                .is_none_or(|key_value| key_value < &promoted)
+        );
 
-        assert!(right_keys
-            .first()
-            .is_none_or(|key_value| &promoted < key_value));
+        assert!(
+            right_keys
+                .first()
+                .is_none_or(|key_value| &promoted < key_value)
+        );
     }
     #[test]
     fn split_leaf_preserves_existing_next_leaf() {
@@ -3950,7 +3961,7 @@ pub mod tree_tests {
         let BPlusNode::Leaf {
             next_leaf: left_next,
             ..
-        } = left
+        } = &*left
         else {
             panic!("expected leaf");
         };
@@ -3958,14 +3969,14 @@ pub mod tree_tests {
         let BPlusNode::Leaf {
             next_leaf: right_next,
             ..
-        } = right
+        } = &*right
         else {
             panic!("expected leaf");
         };
 
-        assert_eq!(left_next, Some(right_page_id));
+        assert_eq!(left_next, &Some(right_page_id));
 
-        assert_eq!(right_next, Some(next_page_id));
+        assert_eq!(right_next, &Some(next_page_id));
     }
     #[test]
     fn duplicate_keys_are_rejected_at_all_positions_after_splits() {
@@ -4315,18 +4326,22 @@ pub mod tree_tests {
     #[derive(Debug)]
     struct FailingNodeStore {
         inner: MemoryNodeStore,
-        fail_writes_after: Option<usize>,
+        fail_writes_after: Mutex<Option<usize>>,
         fail_allocations_after: Option<usize>,
     }
     impl NodeStore for FailingNodeStore {
         type Error = MemoryNodeStoreError;
 
-        fn read_node(&self, page_id: PageId) -> Result<BPlusNode, Self::Error> {
+        fn read_node(&self, page_id: PageId) -> Result<ReadGuard<'_>, Self::Error> {
             self.inner.read_node(page_id)
         }
 
-        fn write_node(&mut self, page_id: PageId, node: &BPlusNode) -> Result<(), Self::Error> {
-            if let Some(remaining) = self.fail_writes_after.as_mut() {
+        fn write_node(
+            &self,
+            page_id: PageId,
+            node: &BPlusNode,
+        ) -> Result<WriteGuard<'_>, Self::Error> {
+            if let Some(remaining) = self.fail_writes_after.lock().as_mut() {
                 if *remaining == 0 {
                     return Err(MemoryNodeStoreError::InvalidNode);
                 }
@@ -4359,7 +4374,7 @@ pub mod tree_tests {
     fn failing_node_store_allows_normal_operations() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4373,7 +4388,7 @@ pub mod tree_tests {
     fn insert_propagates_allocation_failure() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: Some(0),
         };
 
@@ -4385,7 +4400,7 @@ pub mod tree_tests {
     fn insert_propagates_write_failure() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4395,7 +4410,7 @@ pub mod tree_tests {
             tree.insert(fixed_key(i), record_id(i)).unwrap();
         }
 
-        tree.store.fail_writes_after = Some(0);
+        tree.store.fail_writes_after = Mutex::new(Some(0));
 
         let result = tree.insert(fixed_key(101), record_id(101));
 
@@ -4405,7 +4420,7 @@ pub mod tree_tests {
     fn failed_leaf_split_is_detectable() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4420,7 +4435,7 @@ pub mod tree_tests {
         /*
          * Force the next write to fail.
          */
-        tree.store.fail_writes_after = Some(0);
+        tree.store.fail_writes_after = Mutex::new(Some(0));
 
         let result = tree.insert(fixed_key(10_001), record_id(10_001));
 
@@ -4442,7 +4457,7 @@ pub mod tree_tests {
     fn failed_parent_update_is_detectable() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4460,7 +4475,7 @@ pub mod tree_tests {
         /*
          * The next write should fail.
          */
-        tree.store.fail_writes_after = Some(0);
+        tree.store.fail_writes_after = Mutex::new(Some(0));
 
         let result = tree.insert(fixed_key(5_001), record_id(5_001));
 
@@ -4482,7 +4497,7 @@ pub mod tree_tests {
     fn failed_split_allocation_does_not_modify_original_leaf() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4550,7 +4565,10 @@ pub mod tree_tests {
         /*
          * Capture the original state.
          */
-        let before = tree.store.read_node(page_id).unwrap();
+        let before = {
+            let guard = tree.store.read_node(page_id).unwrap();
+            guard.clone()
+        };
 
         /*
          * The next allocation must fail.
@@ -4573,7 +4591,7 @@ pub mod tree_tests {
         let after = tree.store.read_node(page_id).unwrap();
 
         assert_eq!(
-            before, after,
+            &before, &*after,
             "allocation failure modified the original leaf"
         );
     }
@@ -4581,7 +4599,7 @@ pub mod tree_tests {
     fn failed_insert_preserves_existing_search_results() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4593,7 +4611,7 @@ pub mod tree_tests {
             tree.insert(fixed_key(i), record_id(i)).unwrap();
         }
 
-        tree.store.fail_writes_after = Some(0);
+        tree.store.fail_writes_after = Mutex::new(Some(0));
 
         let result = tree.insert(fixed_key(key_count + 1), record_id(key_count + 1));
 
@@ -4614,7 +4632,7 @@ pub mod tree_tests {
     fn failed_insert_never_reports_success() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: Some(0),
+            fail_writes_after: Mutex::new(Some(0)),
             fail_allocations_after: None,
         };
 
@@ -4628,7 +4646,7 @@ pub mod tree_tests {
     fn failed_split_preserves_tree_snapshot() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4680,7 +4698,10 @@ pub mod tree_tests {
             })
             .unwrap();
 
-        let before = tree.store.read_node(page_id).unwrap();
+        let before = {
+            let guard = tree.store.read_node(page_id).unwrap();
+            guard.clone()
+        };
 
         tree.store.fail_allocations_after = Some(0);
 
@@ -4691,7 +4712,7 @@ pub mod tree_tests {
         let after = tree.store.read_node(page_id).unwrap();
 
         assert_eq!(
-            before, after,
+            &before, &*after,
             "failed split allocation modified the original leaf"
         );
     }
@@ -4699,7 +4720,7 @@ pub mod tree_tests {
     fn failed_split_write_preserves_existing_tree() {
         let store = FailingNodeStore {
             inner: MemoryNodeStore::new(),
-            fail_writes_after: None,
+            fail_writes_after: Mutex::new(None),
             fail_allocations_after: None,
         };
 
@@ -4715,7 +4736,7 @@ pub mod tree_tests {
          * Allow allocation, but fail the next write.
          */
         tree.store.fail_allocations_after = None;
-        tree.store.fail_writes_after = Some(0);
+        tree.store.fail_writes_after = Mutex::new(Some(0));
 
         let result = tree.insert(fixed_key(5_000), record_id(5_000));
 
@@ -4881,7 +4902,7 @@ pub mod tree_tests {
         loop {
             let node = tree.store.read_node(page_id).unwrap();
 
-            match node {
+            match &*node {
                 BPlusNode::Leaf { .. } => break,
 
                 BPlusNode::Internal { children, .. } => {
@@ -4899,15 +4920,15 @@ pub mod tree_tests {
                 keys,
                 values,
                 next_leaf,
-            } = node
+            } = &*node
             else {
                 panic!("leaf chain reached an internal node");
             };
 
-            chain_entries.extend(keys.into_iter().zip(values));
+            chain_entries.extend(keys.clone().into_iter().zip(values.clone()));
 
             match next_leaf {
-                Some(next) => page_id = next,
+                Some(next) => page_id = *next,
                 None => break,
             }
         }
