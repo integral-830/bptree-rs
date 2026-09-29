@@ -1,12 +1,12 @@
 use parking_lot::RwLock;
 
+use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
-use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -102,18 +102,21 @@ impl<S: NodeStore> BPlusTree<S> {
 
     fn find_leaf(&self, key: &Key) -> Result<(PageId, BPlusNode), BPlusTreeError<S::Error>> {
         let mut page_id = *self.root_page_id.read();
+        let mut page = self.store.read_node(page_id)?;
 
         loop {
-            let node = self.store.read_node(page_id)?;
-            let node = node.read();
-
+            let node = page.read();
             match &*node {
                 BPlusNode::Internal { keys, children } => {
                     debug_assert_eq!(children.len(), keys.len() + 1);
 
                     let child_index = keys.partition_point(|separator| separator <= key);
+                    let child_page_id = children[child_index];
+                    let child_page = self.store.read_node(child_page_id)?;
+                    drop(node);
 
-                    page_id = children[child_index];
+                    page_id = child_page_id;
+                    page = child_page;
                 }
 
                 leaf @ BPlusNode::Leaf { .. } => {
@@ -393,15 +396,15 @@ pub mod tree_tests {
 
     use parking_lot::{Mutex, RwLock};
 
+    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
-    use crate::slotted_page::{SlotId, PAGE_SIZE};
+    use crate::slotted_page::{PAGE_SIZE, SlotId};
     use crate::storage::memory::{MemoryNodeStore, MemoryNodeStoreError};
     use crate::tree::BPlusTree;
-    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -3985,13 +3988,17 @@ pub mod tree_tests {
 
         assert!(right_keys.windows(2).all(|pair| pair[0] < pair[1]));
 
-        assert!(left_keys
-            .last()
-            .is_none_or(|key_value| key_value < &promoted));
+        assert!(
+            left_keys
+                .last()
+                .is_none_or(|key_value| key_value < &promoted)
+        );
 
-        assert!(right_keys
-            .first()
-            .is_none_or(|key_value| &promoted < key_value));
+        assert!(
+            right_keys
+                .first()
+                .is_none_or(|key_value| &promoted < key_value)
+        );
     }
     #[test]
     fn split_leaf_preserves_existing_next_leaf() {

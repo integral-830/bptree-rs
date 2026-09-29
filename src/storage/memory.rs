@@ -4,9 +4,9 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
+use crate::BPlusNode;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
-use crate::BPlusNode;
 
 #[derive(Debug)]
 pub struct MemoryNodeStore {
@@ -89,11 +89,9 @@ impl NodeStore for MemoryNodeStore {
             .checked_add(1)
             .ok_or(MemoryNodeStoreError::PageIdExhausted)?;
         let new_page_id = PageId::new(*self.next_page_id.lock());
-        {
-            self.tree
-                .write()
-                .insert(new_page_id, Arc::new(RwLock::new(node.clone())))
-        };
+        self.tree
+            .write()
+            .insert(new_page_id, Arc::new(RwLock::new(node.clone())));
         *self.next_page_id.lock() = next_page_id;
         Ok(new_page_id)
     }
@@ -108,7 +106,6 @@ pub mod memory_node_store_tests {
     use crate::record_id::RecordId;
 
     use std::sync::Arc;
-    use std::u64;
 
     fn leaf_node() -> BPlusNode {
         BPlusNode::Leaf {
@@ -314,9 +311,11 @@ pub mod memory_node_store_tests {
 
         let page_id = store.allocate_node(&original).unwrap();
 
-        assert!(store
-            .write_node(PageId::new(500), &internal_node())
-            .is_err());
+        assert!(
+            store
+                .write_node(PageId::new(500), &internal_node())
+                .is_err()
+        );
         let read_node = store.read_node(page_id).unwrap();
         let read_node = read_node.read();
 

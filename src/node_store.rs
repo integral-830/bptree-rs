@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::page_id::PageId;
 use crate::BPlusNode;
+use crate::page_id::PageId;
 
 pub trait NodeStore {
     type Error;
