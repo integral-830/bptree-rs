@@ -1,12 +1,12 @@
 use parking_lot::RwLock;
 
+use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
-use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -248,18 +248,6 @@ impl<S: NodeStore> BPlusTree<S> {
         let _lock = self.store.write_node(page_id, &left_node)?;
 
         Ok((right_page_id, promoted_key))
-    }
-
-    fn is_safe_for_insert(
-        &self,
-        node: &BPlusNode,
-        additional_len: usize,
-    ) -> Result<bool, BPlusTreeError<S::Error>> {
-        let encoded_len = node.encoded_len().map_err(BPlusTreeError::Node)?;
-
-        Ok(encoded_len
-            .checked_add(additional_len)
-            .is_some_and(|new_len| new_len <= PAGE_SIZE))
     }
 
     pub fn insert(&self, key: Key, record_id: RecordId) -> Result<(), BPlusTreeError<S::Error>> {
@@ -987,16 +975,15 @@ impl<S: NodeStore> BPlusTree<S> {
 
         if let (Some(left_page_id), Some(parent_separator)) =
             (left_page_id, separator_from_left.clone())
-        {
-            if self.try_borrow_internal_from_left(
+            && self.try_borrow_internal_from_left(
                 page_id,
                 left_page_id,
                 parent_page_id,
                 parent_separator,
                 child_index,
-            )? {
-                return Ok(());
-            }
+            )?
+        {
+            return Ok(());
         }
 
         // ------------------------------------------------------------
@@ -1005,16 +992,15 @@ impl<S: NodeStore> BPlusTree<S> {
 
         if let (Some(right_page_id), Some(parent_separator)) =
             (right_page_id, separator_from_right.clone())
-        {
-            if self.try_borrow_internal_from_right(
+            && self.try_borrow_internal_from_right(
                 page_id,
                 right_page_id,
                 parent_page_id,
                 parent_separator,
                 child_index,
-            )? {
-                return Ok(());
-            }
+            )?
+        {
+            return Ok(());
         }
 
         // ------------------------------------------------------------
@@ -1481,24 +1467,24 @@ impl<S: NodeStore> BPlusTree<S> {
         /*
          * Prefer borrowing from the left sibling.
          */
-        if let Some(left_page_id) = left_page_id {
-            if self.try_borrow_leaf_from_left(page_id, left_page_id, parent_page_id, child_index)? {
-                return Ok(());
-            }
+        if let Some(left_page_id) = left_page_id
+            && self.try_borrow_leaf_from_left(page_id, left_page_id, parent_page_id, child_index)?
+        {
+            return Ok(());
         }
 
         /*
          * Then try the right sibling.
          */
-        if let Some(right_page_id) = right_page_id {
-            if self.try_borrow_leaf_from_right(
+        if let Some(right_page_id) = right_page_id
+            && self.try_borrow_leaf_from_right(
                 page_id,
                 right_page_id,
                 parent_page_id,
                 child_index,
-            )? {
-                return Ok(());
-            }
+            )?
+        {
+            return Ok(());
         }
 
         /*
@@ -1603,6 +1589,17 @@ impl<S: NodeStore> BPlusTree<S> {
             insert_latch: RwLock::new(()),
         }
     }
+    fn is_safe_for_insert(
+        &self,
+        node: &BPlusNode,
+        additional_len: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let encoded_len = node.encoded_len().map_err(BPlusTreeError::Node)?;
+
+        Ok(encoded_len
+            .checked_add(additional_len)
+            .is_some_and(|new_len| new_len <= PAGE_SIZE))
+    }
 }
 
 #[cfg(test)]
@@ -1611,15 +1608,15 @@ pub mod tree_tests {
 
     use parking_lot::{Mutex, RwLock};
 
+    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
-    use crate::slotted_page::{SlotId, PAGE_SIZE};
+    use crate::slotted_page::{PAGE_SIZE, SlotId};
     use crate::storage::memory::{MemoryNodeStore, MemoryNodeStoreError};
     use crate::tree::BPlusTree;
-    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -5198,13 +5195,17 @@ pub mod tree_tests {
 
         assert!(right_keys.windows(2).all(|pair| pair[0] < pair[1]));
 
-        assert!(left_keys
-            .last()
-            .is_none_or(|key_value| key_value < &promoted));
+        assert!(
+            left_keys
+                .last()
+                .is_none_or(|key_value| key_value < &promoted)
+        );
 
-        assert!(right_keys
-            .first()
-            .is_none_or(|key_value| &promoted < key_value));
+        assert!(
+            right_keys
+                .first()
+                .is_none_or(|key_value| &promoted < key_value)
+        );
     }
     #[test]
     fn split_leaf_preserves_existing_next_leaf() {
