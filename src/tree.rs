@@ -390,6 +390,1208 @@ impl<S: NodeStore> BPlusTree<S> {
 
         Ok(())
     }
+
+    fn is_underflowed(&self, node: &BPlusNode) -> bool {
+        match node {
+            BPlusNode::Leaf { keys, .. } => keys.is_empty(),
+
+            BPlusNode::Internal { keys, .. } => keys.is_empty(),
+        }
+    }
+
+    fn try_borrow_leaf_from_left(
+        &self,
+        page_id: PageId,
+        left_page_id: PageId,
+        parent_page_id: PageId,
+        child_index: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let left_page = self.store.read_node(left_page_id)?;
+        let left_guard = left_page.read();
+
+        let BPlusNode::Leaf {
+            keys: left_keys,
+            values: left_values,
+            ..
+        } = &*left_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "left sibling is not a leaf",
+            ));
+        };
+
+        if left_keys.len() <= 1 {
+            return Ok(false);
+        }
+
+        let borrowed_key = left_keys
+            .last()
+            .cloned()
+            .ok_or(BPlusTreeError::InvalidTreeState(
+                "left sibling unexpectedly empty",
+            ))?;
+
+        let borrowed_value = *left_values.last().ok_or(BPlusTreeError::InvalidTreeState(
+            "left sibling has no value",
+        ))?;
+
+        let mut new_left_keys = left_keys.clone();
+        let mut new_left_values = left_values.clone();
+
+        new_left_keys.pop();
+        new_left_values.pop();
+
+        drop(left_guard);
+
+        let leaf_page = self.store.read_node(page_id)?;
+        let leaf_guard = leaf_page.read();
+
+        let BPlusNode::Leaf {
+            keys,
+            values,
+            next_leaf,
+        } = &*leaf_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "underflowed node is not a leaf",
+            ));
+        };
+
+        let mut new_keys = keys.clone();
+        let mut new_values = values.clone();
+
+        new_keys.insert(0, borrowed_key.clone());
+        new_values.insert(0, borrowed_value);
+
+        let new_leaf = BPlusNode::Leaf {
+            keys: new_keys,
+            values: new_values,
+            next_leaf: *next_leaf,
+        };
+
+        let new_left = BPlusNode::Leaf {
+            keys: new_left_keys,
+            values: new_left_values,
+            next_leaf: match &*leaf_guard {
+                BPlusNode::Leaf { .. } => Some(page_id),
+                _ => unreachable!(),
+            },
+        };
+
+        drop(leaf_guard);
+
+        new_left.validate().map_err(BPlusTreeError::Node)?;
+        new_leaf.validate().map_err(BPlusTreeError::Node)?;
+
+        {
+            let page = self.store.read_node(left_page_id)?;
+            let mut guard = page.write();
+            *guard = new_left;
+        }
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = new_leaf;
+        }
+
+        /*
+         * The first key of the right child is now the
+         * new parent separator.
+         */
+        let page = self.store.read_node(page_id)?;
+        let guard = page.read();
+
+        let first_key = match &*guard {
+            BPlusNode::Leaf { keys, .. } => keys.first().cloned(),
+            _ => None,
+        };
+
+        let Some(first_key) = first_key else {
+            return Err(BPlusTreeError::InvalidTreeState("borrowed leaf has no key"));
+        };
+
+        drop(guard);
+
+        let parent = self.store.read_node(parent_page_id)?;
+        let mut parent_guard = parent.write();
+
+        let BPlusNode::Internal { keys, .. } = &mut *parent_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "leaf parent is not internal",
+            ));
+        };
+
+        keys[child_index - 1] = first_key;
+
+        Ok(true)
+    }
+
+    fn refresh_parent_separator(
+        &self,
+        ancestors: &[PageId],
+        child_page_id: PageId,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let Some(&parent_page_id) = ancestors.last() else {
+            return Ok(());
+        };
+
+        let parent_page = self.store.read_node(parent_page_id)?;
+        let parent_guard = parent_page.read();
+
+        let BPlusNode::Internal { keys: _, children } = &*parent_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent page is not an internal node",
+            ));
+        };
+
+        let Some(child_index) = children
+            .iter()
+            .position(|&page_id| page_id == child_page_id)
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent does not contain child page",
+            ));
+        };
+
+        /*
+         * The first child has no separator in the parent.
+         */
+        if child_index == 0 {
+            return Ok(());
+        }
+
+        let child = self.store.read_node(child_page_id)?;
+        let child_guard = child.read();
+
+        let first_key = match &*child_guard {
+            BPlusNode::Leaf { keys, .. } | BPlusNode::Internal { keys, .. } => keys
+                .first()
+                .cloned()
+                .ok_or(BPlusTreeError::InvalidTreeState(
+                    "non-root child has no key",
+                ))?,
+        };
+
+        drop(child_guard);
+        drop(parent_guard);
+
+        let parent_page = self.store.read_node(parent_page_id)?;
+        let mut parent_guard = parent_page.write();
+
+        let BPlusNode::Internal { keys, .. } = &mut *parent_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent page is not an internal node",
+            ));
+        };
+
+        keys[child_index - 1] = first_key;
+
+        Ok(())
+    }
+    fn try_borrow_leaf_from_right(
+        &self,
+        page_id: PageId,
+        right_page_id: PageId,
+        parent_page_id: PageId,
+        child_index: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let right_page = self.store.read_node(right_page_id)?;
+        let right_guard = right_page.read();
+
+        let BPlusNode::Leaf {
+            keys: right_keys,
+            values: right_values,
+            next_leaf,
+        } = &*right_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "right sibling is not a leaf",
+            ));
+        };
+
+        if right_keys.len() <= 1 {
+            return Ok(false);
+        }
+
+        let borrowed_key = right_keys[0].clone();
+        let borrowed_value = right_values[0];
+
+        let mut new_right_keys = right_keys.clone();
+        let mut new_right_values = right_values.clone();
+
+        new_right_keys.remove(0);
+        new_right_values.remove(0);
+
+        let right_next_leaf = *next_leaf;
+
+        drop(right_guard);
+
+        let leaf_page = self.store.read_node(page_id)?;
+        let leaf_guard = leaf_page.read();
+
+        let BPlusNode::Leaf {
+            keys,
+            values,
+            next_leaf,
+        } = &*leaf_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "underflowed node is not a leaf",
+            ));
+        };
+
+        let mut new_keys = keys.clone();
+        let mut new_values = values.clone();
+
+        new_keys.push(borrowed_key);
+        new_values.push(borrowed_value);
+
+        let new_leaf = BPlusNode::Leaf {
+            keys: new_keys,
+            values: new_values,
+            next_leaf: *next_leaf,
+        };
+
+        let new_right = BPlusNode::Leaf {
+            keys: new_right_keys,
+            values: new_right_values,
+            next_leaf: right_next_leaf,
+        };
+
+        drop(leaf_guard);
+
+        new_leaf.validate().map_err(BPlusTreeError::Node)?;
+        new_right.validate().map_err(BPlusTreeError::Node)?;
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = new_leaf;
+        }
+
+        {
+            let page = self.store.read_node(right_page_id)?;
+            let mut guard = page.write();
+            *guard = new_right;
+        }
+
+        let right_page = self.store.read_node(right_page_id)?;
+        let right_guard = right_page.read();
+
+        let new_separator = match &*right_guard {
+            BPlusNode::Leaf { keys, .. } => keys.first().cloned(),
+            _ => None,
+        };
+
+        let Some(new_separator) = new_separator else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "right sibling became empty after borrowing",
+            ));
+        };
+
+        drop(right_guard);
+
+        let parent = self.store.read_node(parent_page_id)?;
+        let mut parent_guard = parent.write();
+
+        let BPlusNode::Internal { keys, .. } = &mut *parent_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "leaf parent is not internal",
+            ));
+        };
+
+        keys[child_index] = new_separator;
+
+        Ok(true)
+    }
+    fn ensure_page_fits(&self, node: &BPlusNode) -> Result<(), BPlusTreeError<S::Error>> {
+        let encoded_len = node.encoded_len().map_err(BPlusTreeError::Node)?;
+
+        if encoded_len > PAGE_SIZE {
+            return Err(BPlusTreeError::InvalidTreeState("node exceeds PAGE_SIZE"));
+        }
+
+        Ok(())
+    }
+    fn merge_leaf_into_left(
+        &self,
+        ancestors: &[PageId],
+        parent_page_id: PageId,
+        child_index: usize,
+        left_page_id: PageId,
+        page_id: PageId,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let left_page = self.store.read_node(left_page_id)?;
+        let left_guard = left_page.read();
+
+        let BPlusNode::Leaf {
+            keys: left_keys,
+            values: left_values,
+            ..
+        } = &*left_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "left sibling is not a leaf",
+            ));
+        };
+
+        let left_keys = left_keys.clone();
+        let left_values = left_values.clone();
+
+        drop(left_guard);
+
+        let page = self.store.read_node(page_id)?;
+        let page_guard = page.read();
+
+        let BPlusNode::Leaf {
+            keys,
+            values,
+            next_leaf,
+        } = &*page_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "node being merged is not a leaf",
+            ));
+        };
+
+        let mut merged_keys = left_keys;
+        let mut merged_values = left_values;
+
+        merged_keys.extend(keys.clone());
+        merged_values.extend(values.clone());
+
+        let merged = BPlusNode::Leaf {
+            keys: merged_keys,
+            values: merged_values,
+            next_leaf: *next_leaf,
+        };
+
+        drop(page_guard);
+
+        self.ensure_page_fits(&merged)?;
+
+        {
+            let page = self.store.read_node(left_page_id)?;
+            let mut guard = page.write();
+            *guard = merged;
+        }
+
+        self.remove_child_from_parent(ancestors, parent_page_id, child_index)
+    }
+    fn merge_leaf_with_right(
+        &self,
+        ancestors: &[PageId],
+        parent_page_id: PageId,
+        child_index: usize,
+        page_id: PageId,
+        right_page_id: PageId,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let page = self.store.read_node(page_id)?;
+        let page_guard = page.read();
+
+        let BPlusNode::Leaf { keys, values, .. } = &*page_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "node being merged is not a leaf",
+            ));
+        };
+
+        let mut merged_keys = keys.clone();
+        let mut merged_values = values.clone();
+
+        drop(page_guard);
+
+        let right_page = self.store.read_node(right_page_id)?;
+        let right_guard = right_page.read();
+
+        let BPlusNode::Leaf {
+            keys: right_keys,
+            values: right_values,
+            next_leaf,
+        } = &*right_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "right sibling is not a leaf",
+            ));
+        };
+
+        merged_keys.extend(right_keys.clone());
+        merged_values.extend(right_values.clone());
+
+        let merged = BPlusNode::Leaf {
+            keys: merged_keys,
+            values: merged_values,
+            next_leaf: *next_leaf,
+        };
+
+        drop(right_guard);
+
+        self.ensure_page_fits(&merged)?;
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = merged;
+        }
+
+        self.remove_child_from_parent(ancestors, parent_page_id, child_index + 1)
+    }
+    fn remove_child_from_parent(
+        &self,
+        ancestors: &[PageId],
+        parent_page_id: PageId,
+        child_index: usize,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let parent_page = self.store.read_node(parent_page_id)?;
+        let parent_guard = parent_page.read();
+
+        let BPlusNode::Internal { keys, children } = &*parent_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent is not an internal node",
+            ));
+        };
+
+        let mut new_keys = keys.clone();
+        let mut new_children = children.clone();
+
+        drop(parent_guard);
+
+        /*
+         * Removing child i removes:
+         *
+         * separator i-1 when i > 0
+         *
+         * otherwise separator 0
+         */
+        let separator_index = if child_index == 0 { 0 } else { child_index - 1 };
+
+        if new_children.len() <= 1 {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent cannot remove its final child",
+            ));
+        }
+
+        new_children.remove(child_index);
+
+        if !new_keys.is_empty() {
+            new_keys.remove(separator_index);
+        }
+
+        let updated_parent = BPlusNode::Internal {
+            keys: new_keys,
+            children: new_children,
+        };
+
+        updated_parent.validate().map_err(BPlusTreeError::Node)?;
+
+        /*
+         * Root contraction.
+         */
+        if ancestors.len() == 1 {
+            let is_single_child = match &updated_parent {
+                BPlusNode::Internal { children, .. } => children.len() == 1,
+                _ => false,
+            };
+
+            if is_single_child {
+                let new_root = match &updated_parent {
+                    BPlusNode::Internal { children, .. } => children[0],
+                    _ => unreachable!(),
+                };
+
+                *self.root_page_id.write() = new_root;
+
+                return Ok(());
+            }
+        }
+
+        self.ensure_page_fits(&updated_parent)?;
+
+        {
+            let page = self.store.read_node(parent_page_id)?;
+            let mut guard = page.write();
+            *guard = updated_parent.clone();
+        }
+
+        /*
+         * Parent still has at least one key.
+         */
+        if !self.is_underflowed(&updated_parent) {
+            return Ok(());
+        }
+
+        /*
+         * Parent itself underflowed.
+         *
+         * Continue upward.
+         */
+        self.repair_internal_underflow(&ancestors[..ancestors.len() - 1], parent_page_id)
+    }
+    fn repair_internal_underflow(
+        &self,
+        ancestors: &[PageId],
+        page_id: PageId,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let Some(&parent_page_id) = ancestors.last() else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "underflowed internal node has no parent",
+            ));
+        };
+
+        let parent_page = self.store.read_node(parent_page_id)?;
+        let parent_guard = parent_page.read();
+
+        let BPlusNode::Internal {
+            keys: parent_keys,
+            children: parent_children,
+        } = &*parent_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "internal node parent is not an internal node",
+            ));
+        };
+
+        let Some(child_index) = parent_children.iter().position(|&child| child == page_id) else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent does not contain underflowed child",
+            ));
+        };
+
+        let left_page_id = child_index
+            .checked_sub(1)
+            .and_then(|index| parent_children.get(index))
+            .copied();
+
+        let right_page_id = parent_children.get(child_index + 1).copied();
+
+        /*
+         * The separator immediately to the left of this child.
+         *
+         * parent_keys[i] separates children[i] and children[i + 1].
+         */
+        let separator_from_left = child_index
+            .checked_sub(1)
+            .and_then(|index| parent_keys.get(index))
+            .cloned();
+
+        /*
+         * The separator immediately to the right of this child.
+         */
+        let separator_from_right = parent_keys.get(child_index).cloned();
+
+        drop(parent_guard);
+
+        // ------------------------------------------------------------
+        // 1. Try borrowing from the left sibling.
+        // ------------------------------------------------------------
+
+        if let (Some(left_page_id), Some(parent_separator)) =
+            (left_page_id, separator_from_left.clone())
+        {
+            if self.try_borrow_internal_from_left(
+                page_id,
+                left_page_id,
+                parent_page_id,
+                parent_separator,
+                child_index,
+            )? {
+                return Ok(());
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 2. Try borrowing from the right sibling.
+        // ------------------------------------------------------------
+
+        if let (Some(right_page_id), Some(parent_separator)) =
+            (right_page_id, separator_from_right.clone())
+        {
+            if self.try_borrow_internal_from_right(
+                page_id,
+                right_page_id,
+                parent_page_id,
+                parent_separator,
+                child_index,
+            )? {
+                return Ok(());
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 3. Neither sibling can lend.
+        //
+        // Prefer merging into the left sibling.
+        // ------------------------------------------------------------
+
+        if let (Some(left_page_id), Some(parent_separator)) =
+            (left_page_id, separator_from_left.clone())
+        {
+            return self.merge_internal_into_left(
+                ancestors,
+                parent_page_id,
+                child_index,
+                left_page_id,
+                page_id,
+                parent_separator,
+            );
+        }
+
+        // ------------------------------------------------------------
+        // 4. No left sibling, so merge with the right sibling.
+        // ------------------------------------------------------------
+
+        if let (Some(right_page_id), Some(parent_separator)) =
+            (right_page_id, separator_from_right.clone())
+        {
+            return self.merge_internal_with_right(
+                ancestors,
+                parent_page_id,
+                child_index,
+                page_id,
+                right_page_id,
+                parent_separator,
+            );
+        }
+
+        Err(BPlusTreeError::InvalidTreeState(
+            "underflowed internal node has no sibling",
+        ))
+    }
+    fn merge_internal_with_right(
+        &self,
+        ancestors: &[PageId],
+        parent_page_id: PageId,
+        child_index: usize,
+        page_id: PageId,
+        right_page_id: PageId,
+        parent_separator: Key,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let page = self.store.read_node(page_id)?;
+        let page_guard = page.read();
+
+        let BPlusNode::Internal { keys, children } = &*page_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "node being merged is not internal",
+            ));
+        };
+
+        let mut merged_keys = keys.clone();
+        let mut merged_children = children.clone();
+
+        drop(page_guard);
+
+        let right_page = self.store.read_node(right_page_id)?;
+        let right_guard = right_page.read();
+
+        let BPlusNode::Internal {
+            keys: right_keys,
+            children: right_children,
+        } = &*right_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "right sibling is not internal",
+            ));
+        };
+
+        merged_keys.push(parent_separator);
+        merged_keys.extend(right_keys.clone());
+
+        merged_children.extend(right_children.clone());
+
+        drop(right_guard);
+
+        let merged = BPlusNode::Internal {
+            keys: merged_keys,
+            children: merged_children,
+        };
+
+        merged.validate().map_err(BPlusTreeError::Node)?;
+
+        self.ensure_page_fits(&merged)?;
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = merged;
+        }
+
+        /*
+         * Remove the right child from the parent.
+         */
+        self.remove_child_from_parent(ancestors, parent_page_id, child_index + 1)
+    }
+    fn try_borrow_internal_from_left(
+        &self,
+        page_id: PageId,
+        left_page_id: PageId,
+        parent_page_id: PageId,
+        parent_separator: Key,
+        child_index: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let left_page = self.store.read_node(left_page_id)?;
+        let left_guard = left_page.read();
+
+        let BPlusNode::Internal {
+            keys: left_keys,
+            children: left_children,
+        } = &*left_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "left sibling is not an internal node",
+            ));
+        };
+
+        /*
+         * The left sibling must retain at least one key.
+         */
+        if left_keys.len() <= 1 {
+            return Ok(false);
+        }
+
+        let borrowed_key = left_keys
+            .last()
+            .cloned()
+            .ok_or(BPlusTreeError::InvalidTreeState(
+                "left internal sibling has no key",
+            ))?;
+
+        let borrowed_child =
+            left_children
+                .last()
+                .copied()
+                .ok_or(BPlusTreeError::InvalidTreeState(
+                    "left internal sibling has no child",
+                ))?;
+
+        let mut new_left_keys = left_keys.clone();
+        let mut new_left_children = left_children.clone();
+
+        new_left_keys.pop();
+        new_left_children.pop();
+
+        drop(left_guard);
+
+        let child_page = self.store.read_node(page_id)?;
+        let child_guard = child_page.read();
+
+        let BPlusNode::Internal { keys, children } = &*child_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "underflowed node is not internal",
+            ));
+        };
+
+        let mut new_keys = keys.clone();
+        let mut new_children = children.clone();
+
+        /*
+         * Parent separator moves DOWN into the underflowed node.
+         */
+        new_keys.insert(0, parent_separator);
+
+        /*
+         * The borrowed child becomes the first child.
+         */
+        new_children.insert(0, borrowed_child);
+
+        let new_left = BPlusNode::Internal {
+            keys: new_left_keys,
+            children: new_left_children,
+        };
+
+        let new_child = BPlusNode::Internal {
+            keys: new_keys,
+            children: new_children,
+        };
+
+        drop(child_guard);
+
+        new_left.validate().map_err(BPlusTreeError::Node)?;
+
+        new_child.validate().map_err(BPlusTreeError::Node)?;
+
+        self.ensure_page_fits(&new_left)?;
+        self.ensure_page_fits(&new_child)?;
+
+        /*
+         * The key that moved upward becomes the new parent separator.
+         */
+        let new_parent_separator = borrowed_key;
+
+        {
+            let page = self.store.read_node(left_page_id)?;
+            let mut guard = page.write();
+            *guard = new_left;
+        }
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = new_child;
+        }
+
+        {
+            let page = self.store.read_node(parent_page_id)?;
+            let mut guard = page.write();
+
+            let BPlusNode::Internal { keys, .. } = &mut *guard else {
+                return Err(BPlusTreeError::InvalidTreeState("parent is not internal"));
+            };
+
+            keys[child_index - 1] = new_parent_separator;
+        }
+
+        Ok(true)
+    }
+    fn try_borrow_internal_from_right(
+        &self,
+        page_id: PageId,
+        right_page_id: PageId,
+        parent_page_id: PageId,
+        parent_separator: Key,
+        child_index: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let right_page = self.store.read_node(right_page_id)?;
+        let right_guard = right_page.read();
+
+        let BPlusNode::Internal {
+            keys: right_keys,
+            children: right_children,
+        } = &*right_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "right sibling is not an internal node",
+            ));
+        };
+
+        /*
+         * The right sibling must retain at least one key.
+         */
+        if right_keys.len() <= 1 {
+            return Ok(false);
+        }
+
+        let borrowed_key = right_keys
+            .first()
+            .cloned()
+            .ok_or(BPlusTreeError::InvalidTreeState(
+                "right internal sibling has no key",
+            ))?;
+
+        let borrowed_child =
+            right_children
+                .first()
+                .copied()
+                .ok_or(BPlusTreeError::InvalidTreeState(
+                    "right internal sibling has no child",
+                ))?;
+
+        let mut new_right_keys = right_keys.clone();
+        let mut new_right_children = right_children.clone();
+
+        new_right_keys.remove(0);
+        new_right_children.remove(0);
+
+        drop(right_guard);
+
+        let child_page = self.store.read_node(page_id)?;
+        let child_guard = child_page.read();
+
+        let BPlusNode::Internal { keys, children } = &*child_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "underflowed node is not internal",
+            ));
+        };
+
+        let mut new_keys = keys.clone();
+        let mut new_children = children.clone();
+
+        /*
+         * Parent separator moves DOWN into the underflowed node.
+         */
+        new_keys.push(parent_separator);
+
+        /*
+         * Borrowed child becomes the last child.
+         */
+        new_children.push(borrowed_child);
+
+        let new_child = BPlusNode::Internal {
+            keys: new_keys,
+            children: new_children,
+        };
+
+        let new_right = BPlusNode::Internal {
+            keys: new_right_keys,
+            children: new_right_children,
+        };
+
+        drop(child_guard);
+
+        new_child.validate().map_err(BPlusTreeError::Node)?;
+
+        new_right.validate().map_err(BPlusTreeError::Node)?;
+
+        self.ensure_page_fits(&new_child)?;
+        self.ensure_page_fits(&new_right)?;
+
+        /*
+         * First key of the right sibling becomes
+         * the new parent separator.
+         */
+        let new_parent_separator = borrowed_key;
+
+        {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = new_child;
+        }
+
+        {
+            let page = self.store.read_node(right_page_id)?;
+            let mut guard = page.write();
+            *guard = new_right;
+        }
+
+        {
+            let page = self.store.read_node(parent_page_id)?;
+            let mut guard = page.write();
+
+            let BPlusNode::Internal { keys, .. } = &mut *guard else {
+                return Err(BPlusTreeError::InvalidTreeState("parent is not internal"));
+            };
+
+            keys[child_index] = new_parent_separator;
+        }
+
+        Ok(true)
+    }
+    fn merge_internal_into_left(
+        &self,
+        ancestors: &[PageId],
+        parent_page_id: PageId,
+        child_index: usize,
+        left_page_id: PageId,
+        page_id: PageId,
+        parent_separator: Key,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let left_page = self.store.read_node(left_page_id)?;
+        let left_guard = left_page.read();
+
+        let BPlusNode::Internal {
+            keys: left_keys,
+            children: left_children,
+        } = &*left_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "left sibling is not internal",
+            ));
+        };
+
+        let mut merged_keys = left_keys.clone();
+        let mut merged_children = left_children.clone();
+
+        drop(left_guard);
+
+        let page = self.store.read_node(page_id)?;
+        let page_guard = page.read();
+
+        let BPlusNode::Internal { keys, children } = &*page_guard else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "node being merged is not internal",
+            ));
+        };
+
+        /*
+         * Parent separator is pulled down between
+         * the two sets of keys.
+         */
+        merged_keys.push(parent_separator);
+        merged_keys.extend(keys.clone());
+
+        merged_children.extend(children.clone());
+
+        drop(page_guard);
+
+        let merged = BPlusNode::Internal {
+            keys: merged_keys,
+            children: merged_children,
+        };
+
+        merged.validate().map_err(BPlusTreeError::Node)?;
+
+        self.ensure_page_fits(&merged)?;
+
+        {
+            let page = self.store.read_node(left_page_id)?;
+            let mut guard = page.write();
+            *guard = merged;
+        }
+
+        /*
+         * Remove the underflowed child from its parent.
+         */
+        self.remove_child_from_parent(ancestors, parent_page_id, child_index)
+    }
+    fn repair_leaf_underflow(
+        &self,
+        ancestors: &[PageId],
+        page_id: PageId,
+        _leaf: BPlusNode,
+    ) -> Result<(), BPlusTreeError<S::Error>> {
+        let Some(&parent_page_id) = ancestors.last() else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "non-root leaf has no parent",
+            ));
+        };
+
+        let parent_page = self.store.read_node(parent_page_id)?;
+        let parent_guard = parent_page.read();
+
+        let BPlusNode::Internal {
+            keys: parent_keys,
+            children,
+        } = &*parent_guard
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "leaf parent is not internal",
+            ));
+        };
+
+        let Some(child_index) = children.iter().position(|&child| child == page_id) else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "parent does not contain underflowed leaf",
+            ));
+        };
+
+        let left_page_id = child_index
+            .checked_sub(1)
+            .and_then(|index| children.get(index))
+            .copied();
+
+        let right_page_id = children.get(child_index + 1).copied();
+
+        let _parent_separator = if child_index > 0 {
+            Some(parent_keys[child_index - 1].clone())
+        } else {
+            None
+        };
+
+        drop(parent_guard);
+
+        /*
+         * Prefer borrowing from the left sibling.
+         */
+        if let Some(left_page_id) = left_page_id {
+            if self.try_borrow_leaf_from_left(page_id, left_page_id, parent_page_id, child_index)? {
+                return Ok(());
+            }
+        }
+
+        /*
+         * Then try the right sibling.
+         */
+        if let Some(right_page_id) = right_page_id {
+            if self.try_borrow_leaf_from_right(
+                page_id,
+                right_page_id,
+                parent_page_id,
+                child_index,
+            )? {
+                return Ok(());
+            }
+        }
+
+        /*
+         * Neither sibling can lend.
+         * Merge with the left when possible, otherwise merge right.
+         */
+        if let Some(left_page_id) = left_page_id {
+            return self.merge_leaf_into_left(
+                ancestors,
+                parent_page_id,
+                child_index,
+                left_page_id,
+                page_id,
+            );
+        }
+
+        if let Some(right_page_id) = right_page_id {
+            return self.merge_leaf_with_right(
+                ancestors,
+                parent_page_id,
+                child_index,
+                page_id,
+                right_page_id,
+            );
+        }
+
+        Err(BPlusTreeError::InvalidTreeState(
+            "underflowed leaf has no sibling",
+        ))
+    }
+
+    pub fn delete(&self, key: &Key) -> Result<Option<RecordId>, BPlusTreeError<S::Error>> {
+        let _delete_guard = self.insert_latch.write();
+
+        let (ancestors, page_id, node) = self.find_leaf_path(key)?;
+
+        let BPlusNode::Leaf {
+            mut keys,
+            mut values,
+            next_leaf,
+        } = node
+        else {
+            return Err(BPlusTreeError::InvalidTreeState(
+                "find_leaf_path returned an internal node",
+            ));
+        };
+
+        let Ok(index) = keys.binary_search(key) else {
+            return Ok(None);
+        };
+
+        let removed_value = values[index];
+
+        keys.remove(index);
+        values.remove(index);
+
+        let updated_leaf = BPlusNode::Leaf {
+            keys,
+            values,
+            next_leaf,
+        };
+
+        /*
+         * Root leaf may legally become empty.
+         */
+        if ancestors.is_empty() {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = updated_leaf;
+
+            return Ok(Some(removed_value));
+        }
+
+        /*
+         * A non-root leaf with at least one key is not underflowed.
+         */
+        if !self.is_underflowed(&updated_leaf) {
+            let page = self.store.read_node(page_id)?;
+            let mut guard = page.write();
+            *guard = updated_leaf;
+
+            self.refresh_parent_separator(&ancestors, page_id)?;
+
+            return Ok(Some(removed_value));
+        }
+
+        /*
+         * Leaf underflow requires redistribution or merge.
+         */
+        self.repair_leaf_underflow(&ancestors, page_id, updated_leaf)?;
+
+        Ok(Some(removed_value))
+    }
 }
 
 #[cfg(test)]
@@ -5139,5 +6341,61 @@ pub mod tree_tests {
         };
 
         assert!(tree.is_safe_for_insert(&node, 0).unwrap());
+    }
+    #[test]
+    fn delete_existing_key_returns_record_id() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let record_id = RecordId::new(PageId::new(10), 1);
+
+        tree.insert(Key::new(b"a".to_vec()), record_id).unwrap();
+
+        assert_eq!(
+            tree.delete(&Key::new(b"a".to_vec())).unwrap(),
+            Some(record_id)
+        );
+
+        assert_eq!(tree.search(&Key::new(b"a".to_vec())).unwrap(), None);
+    }
+    #[test]
+    fn delete_missing_key_returns_none() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        assert_eq!(tree.delete(&Key::new(b"missing".to_vec())).unwrap(), None);
+    }
+    #[test]
+    fn delete_last_key_leaves_empty_root_leaf() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let key = Key::new(b"a".to_vec());
+        let value = RecordId::new(PageId::new(1), 1);
+
+        tree.insert(key.clone(), value).unwrap();
+
+        assert_eq!(tree.delete(&key).unwrap(), Some(value));
+
+        assert!(tree.scan().unwrap().is_empty());
+    }
+    #[test]
+    fn delete_preserves_remaining_entries() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        for i in 0..20 {
+            tree.insert(
+                Key::new(format!("{i:02}").into_bytes()),
+                RecordId::new(PageId::new(i), 0),
+            )
+            .unwrap();
+        }
+
+        tree.delete(&Key::new(b"05".to_vec())).unwrap();
+
+        assert_eq!(
+            tree.search(&Key::new(b"04".to_vec())).unwrap(),
+            Some(RecordId::new(PageId::new(4), 0))
+        );
+
+        assert_eq!(tree.search(&Key::new(b"05".to_vec())).unwrap(), None);
+
+        assert_eq!(
+            tree.search(&Key::new(b"06".to_vec())).unwrap(),
+            Some(RecordId::new(PageId::new(6), 0))
+        );
     }
 }
