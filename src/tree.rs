@@ -1,12 +1,12 @@
 use parking_lot::RwLock;
 
-use crate::BPlusNode;
 use crate::error::BPlusTreeError;
 use crate::key::Key;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
 use crate::record_id::RecordId;
 use crate::slotted_page::PAGE_SIZE;
+use crate::BPlusNode;
 
 pub struct BPlusTree<S: NodeStore> {
     store: S,
@@ -249,6 +249,19 @@ impl<S: NodeStore> BPlusTree<S> {
 
         Ok((right_page_id, promoted_key))
     }
+
+    fn is_safe_for_insert(
+        &self,
+        node: &BPlusNode,
+        additional_len: usize,
+    ) -> Result<bool, BPlusTreeError<S::Error>> {
+        let encoded_len = node.encoded_len().map_err(BPlusTreeError::Node)?;
+
+        Ok(encoded_len
+            .checked_add(additional_len)
+            .is_some_and(|new_len| new_len <= PAGE_SIZE))
+    }
+
     pub fn insert(&self, key: Key, record_id: RecordId) -> Result<(), BPlusTreeError<S::Error>> {
         let _guard = self.insert_latch.write();
         let (ancestors, page_id, node) = self.find_leaf_path(&key)?;
@@ -396,15 +409,15 @@ pub mod tree_tests {
 
     use parking_lot::{Mutex, RwLock};
 
-    use crate::BPlusNode;
     use crate::error::BPlusTreeError;
     use crate::key::Key;
     use crate::node_store::NodeStore;
     use crate::page_id::PageId;
     use crate::record_id::RecordId;
-    use crate::slotted_page::{PAGE_SIZE, SlotId};
+    use crate::slotted_page::{SlotId, PAGE_SIZE};
     use crate::storage::memory::{MemoryNodeStore, MemoryNodeStoreError};
     use crate::tree::BPlusTree;
+    use crate::BPlusNode;
 
     fn key(value: &str) -> Key {
         Key::new(value.as_bytes().to_vec())
@@ -428,16 +441,11 @@ pub mod tree_tests {
         let node = tree.store.read_node(page_id).unwrap();
         let node = node.read();
 
-        assert!(
-            node.validate().is_ok(),
-            "invalid node at page {:?}",
-            page_id
-        );
+        assert!(node.validate().is_ok(), "invalid node at page {page_id:?}");
 
         assert!(
             node.encoded_len().unwrap() <= PAGE_SIZE,
-            "node exceeds PAGE_SIZE at page {:?}",
-            page_id
+            "node exceeds PAGE_SIZE at page {page_id:?}",
         );
 
         match &*node {
@@ -478,7 +486,7 @@ pub mod tree_tests {
 
     #[test]
     fn scan_single_leaf() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b"), key("c")],
@@ -549,7 +557,7 @@ pub mod tree_tests {
 
     #[test]
     fn scan_descends_to_leftmost_leaf() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -601,7 +609,7 @@ pub mod tree_tests {
 
     #[test]
     fn scan_preserves_global_sorted_order() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf3 = BPlusNode::Leaf {
             keys: vec![key("e"), key("f")],
@@ -641,7 +649,7 @@ pub mod tree_tests {
 
     #[test]
     fn scan_handles_empty_leaf_between_non_empty_leaves() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf3 = BPlusNode::Leaf {
             keys: vec![key("c")],
@@ -679,7 +687,7 @@ pub mod tree_tests {
 
     #[test]
     fn scan_handles_multiple_internal_levels() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf4 = BPlusNode::Leaf {
             keys: vec![key("g"), key("h")],
@@ -764,7 +772,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_existing_key_returns_record_id() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b"), key("c")],
@@ -785,7 +793,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_missing_key_returns_none() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("c"), key("e")],
@@ -804,7 +812,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_routes_to_left_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -838,7 +846,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_routes_to_middle_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -880,7 +888,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_routes_to_right_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -912,7 +920,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_separator_equality_routes_right() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         // If equality incorrectly routes left, this test will fail.
         let left_leaf = BPlusNode::Leaf {
@@ -945,7 +953,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_handles_key_smaller_than_all_separators() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -985,7 +993,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_handles_key_greater_than_all_separators() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -1025,7 +1033,7 @@ pub mod tree_tests {
 
     #[test]
     fn search_handles_multiple_internal_levels() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf1 = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -1087,7 +1095,7 @@ pub mod tree_tests {
 
     #[test]
     fn find_leaf_returns_root_when_root_is_leaf() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -1106,7 +1114,7 @@ pub mod tree_tests {
     }
     #[test]
     fn find_leaf_routes_to_left_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -1139,7 +1147,7 @@ pub mod tree_tests {
     }
     #[test]
     fn find_leaf_routes_to_middle_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -1180,7 +1188,7 @@ pub mod tree_tests {
     }
     #[test]
     fn find_leaf_routes_to_right_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left = BPlusNode::Leaf {
             keys: vec![key("a")],
@@ -1213,7 +1221,7 @@ pub mod tree_tests {
     }
     #[test]
     fn find_leaf_separator_equality_routes_right() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left = BPlusNode::Leaf {
             keys: vec![key("a"), key("l")],
@@ -1246,7 +1254,7 @@ pub mod tree_tests {
     }
     #[test]
     fn find_leaf_handles_multiple_internal_levels() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf1 = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -1303,7 +1311,7 @@ pub mod tree_tests {
     #[test]
     fn insert_into_empty_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key = key("a");
         let record_id = record(1, 0);
@@ -1319,7 +1327,7 @@ pub mod tree_tests {
 
     #[test]
     fn insert_at_beginning() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("b"), key("c")],
@@ -1329,7 +1337,7 @@ pub mod tree_tests {
 
         let root_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, root_id);
+        let tree = BPlusTree::from_root(store, root_id);
 
         tree.insert(key("a"), record(1, 0)).unwrap();
 
@@ -1345,7 +1353,7 @@ pub mod tree_tests {
 
     #[test]
     fn insert_in_middle() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("c")],
@@ -1355,7 +1363,7 @@ pub mod tree_tests {
 
         let root_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, root_id);
+        let tree = BPlusTree::from_root(store, root_id);
 
         tree.insert(key("b"), record(1, 1)).unwrap();
 
@@ -1371,7 +1379,7 @@ pub mod tree_tests {
 
     #[test]
     fn insert_at_end() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("a"), key("b")],
@@ -1381,7 +1389,7 @@ pub mod tree_tests {
 
         let root_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, root_id);
+        let tree = BPlusTree::from_root(store, root_id);
 
         tree.insert(key("c"), record(1, 2)).unwrap();
 
@@ -1398,7 +1406,7 @@ pub mod tree_tests {
     #[test]
     fn insert_preserves_sorted_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("d"), record(1, 3)).unwrap();
         tree.insert(key("a"), record(1, 0)).unwrap();
@@ -1419,7 +1427,7 @@ pub mod tree_tests {
     #[test]
     fn insert_preserves_key_value_alignment() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("a"), record(10, 0)).unwrap();
         tree.insert(key("c"), record(10, 2)).unwrap();
@@ -1435,7 +1443,7 @@ pub mod tree_tests {
     #[test]
     fn insert_duplicate_key_returns_error() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("a"), record(1, 0)).unwrap();
 
@@ -1447,7 +1455,7 @@ pub mod tree_tests {
     #[test]
     fn duplicate_insert_does_not_modify_existing_value() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("a"), record(1, 0)).unwrap();
 
@@ -1461,7 +1469,7 @@ pub mod tree_tests {
     #[test]
     fn duplicate_insert_does_not_modify_tree() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("a"), record(1, 0)).unwrap();
         tree.insert(key("c"), record(1, 2)).unwrap();
@@ -1480,7 +1488,7 @@ pub mod tree_tests {
     #[test]
     fn insert_fills_leaf_until_capacity() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -1503,7 +1511,7 @@ pub mod tree_tests {
     #[test]
     fn insert_then_search_finds_key() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("hello"), record(42, 7)).unwrap();
 
@@ -1513,7 +1521,7 @@ pub mod tree_tests {
     #[test]
     fn insert_then_scan_returns_inserted_entries() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(key("c"), record(1, 2)).unwrap();
         tree.insert(key("a"), record(1, 0)).unwrap();
@@ -1531,7 +1539,7 @@ pub mod tree_tests {
 
     #[test]
     fn insert_preserves_existing_next_leaf() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let next_leaf = BPlusNode::Leaf {
             keys: vec![key("z")],
@@ -1549,7 +1557,7 @@ pub mod tree_tests {
 
         let root_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, root_id);
+        let tree = BPlusTree::from_root(store, root_id);
 
         tree.insert(key("b"), record(1, 1)).unwrap();
 
@@ -1579,7 +1587,7 @@ pub mod tree_tests {
 
     #[test]
     fn find_leaf_path_one_internal_level() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("0001"), key("0002")],
@@ -1616,7 +1624,7 @@ pub mod tree_tests {
 
     #[test]
     fn find_leaf_path_routes_to_right_child() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("0001")],
@@ -1653,7 +1661,7 @@ pub mod tree_tests {
 
     #[test]
     fn find_leaf_path_separator_equality_routes_right() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let left_leaf = BPlusNode::Leaf {
             keys: vec![key("0001")],
@@ -1690,7 +1698,7 @@ pub mod tree_tests {
 
     #[test]
     fn find_leaf_path_multiple_internal_levels() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let l1 = BPlusNode::Leaf {
             keys: vec![key("0001")],
@@ -1754,7 +1762,7 @@ pub mod tree_tests {
     }
     #[test]
     fn split_leaf_preserves_all_entries() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![
@@ -1778,7 +1786,7 @@ pub mod tree_tests {
 
         let leaf_page_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+        let tree = BPlusTree::from_root(store, leaf_page_id);
 
         let (right_page_id, separator) = tree
             .split_leaf(
@@ -1848,7 +1856,7 @@ pub mod tree_tests {
     }
     #[test]
     fn split_leaf_rightmost_sets_right_next_to_none() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
@@ -1858,7 +1866,7 @@ pub mod tree_tests {
 
         let leaf_page_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+        let tree = BPlusTree::from_root(store, leaf_page_id);
 
         let (right_page_id, separator) = tree
             .split_leaf(
@@ -1899,7 +1907,7 @@ pub mod tree_tests {
     }
     #[test]
     fn split_leaf_separator_is_first_right_key() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![
@@ -1923,7 +1931,7 @@ pub mod tree_tests {
 
         let leaf_page_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+        let tree = BPlusTree::from_root(store, leaf_page_id);
 
         let (right_page_id, separator) = tree
             .split_leaf(
@@ -1964,7 +1972,7 @@ pub mod tree_tests {
     }
     #[test]
     fn split_leaf_keeps_original_page_as_left_leaf() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![key("0001"), key("0002"), key("0003"), key("0004")],
@@ -1974,7 +1982,7 @@ pub mod tree_tests {
 
         let leaf_page_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+        let tree = BPlusTree::from_root(store, leaf_page_id);
 
         let (right_page_id, _) = tree
             .split_leaf(
@@ -2002,7 +2010,7 @@ pub mod tree_tests {
     }
     #[test]
     fn split_leaf_preserves_sorted_order() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let leaf = BPlusNode::Leaf {
             keys: vec![
@@ -2026,7 +2034,7 @@ pub mod tree_tests {
 
         let leaf_page_id = store.allocate_node(&leaf).unwrap();
 
-        let mut tree = BPlusTree::from_root(store, leaf_page_id);
+        let tree = BPlusTree::from_root(store, leaf_page_id);
 
         let (right_page_id, _) = tree
             .split_leaf(
@@ -2078,7 +2086,7 @@ pub mod tree_tests {
     #[test]
     fn insert_splits_root_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -2125,7 +2133,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_preserves_all_entries() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut expected = Vec::new();
 
@@ -2152,7 +2160,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_updates_root_page_id() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let original_root_page_id = *tree.root_page_id.read();
 
@@ -2172,7 +2180,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_keeps_old_root_as_left_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let old_root_page_id = *tree.root_page_id.read();
 
@@ -2207,7 +2215,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_creates_two_leaf_children() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1000u16 {
             tree.insert(key(&format!("{i:04}")), record(1, i)).unwrap();
@@ -2241,7 +2249,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_separator_is_first_right_key() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1000u16 {
             tree.insert(key(&format!("{i:04}")), record(1, i)).unwrap();
@@ -2287,7 +2295,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_preserves_leaf_chain() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1000u16 {
             tree.insert(key(&format!("{i:04}")), record(1, i)).unwrap();
@@ -2341,7 +2349,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_searches_both_leaves() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -2371,7 +2379,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_scan_is_sorted() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1000u16 {
             tree.insert(key(&format!("{i:04}")), record(1, i)).unwrap();
@@ -2393,7 +2401,7 @@ pub mod tree_tests {
     #[test]
     fn insert_root_split_separator_equality_searches_right_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1000u16 {
             tree.insert(key(&format!("{i:04}")), record(1, i)).unwrap();
@@ -2439,7 +2447,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_promotes_middle_key() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2489,7 +2497,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_promoted_key_is_removed_from_children() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2537,7 +2545,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_all_keys() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2590,7 +2598,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_all_children() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2644,7 +2652,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_internal_cardinality() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2694,7 +2702,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_sorted_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![
             key("a"),
@@ -2746,7 +2754,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_original_page_becomes_left_node() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2786,7 +2794,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_allocates_right_node() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2825,7 +2833,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_resulting_nodes_validate() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d"), key("e")];
 
@@ -2859,7 +2867,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_resulting_nodes_fit_page_size() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..100).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -2886,7 +2894,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_with_even_key_count() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys = vec![key("a"), key("b"), key("c"), key("d")];
 
@@ -2933,7 +2941,7 @@ pub mod tree_tests {
     #[test]
     fn insert_after_leaf_full_splits_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -2970,7 +2978,7 @@ pub mod tree_tests {
     #[test]
     fn leaf_split_preserves_existing_entries_and_new_entry() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -2997,7 +3005,7 @@ pub mod tree_tests {
     #[test]
     fn insert_leaf_split_updates_existing_parent() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -3029,7 +3037,7 @@ pub mod tree_tests {
     #[test]
     fn insert_leaf_split_creates_internal_root() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let original_root = *tree.root_page_id.read();
 
@@ -3068,7 +3076,7 @@ pub mod tree_tests {
     #[test]
     fn insert_after_root_leaf_split_searches_both_sides() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut inserted = Vec::new();
 
@@ -3099,7 +3107,7 @@ pub mod tree_tests {
     #[test]
     fn insert_preserves_sorted_scan_after_multiple_leaf_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut expected = Vec::new();
 
@@ -3120,7 +3128,7 @@ pub mod tree_tests {
     #[test]
     fn insert_preserves_leaf_chain_after_multiple_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3184,7 +3192,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_splits_preserves_every_record() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let total = 2_000u64;
 
@@ -3209,7 +3217,7 @@ pub mod tree_tests {
     #[test]
     fn insert_duplicate_after_multiple_splits_is_rejected() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..1_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3236,7 +3244,7 @@ pub mod tree_tests {
     #[test]
     fn insert_creates_multiple_internal_children() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..2_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3260,7 +3268,7 @@ pub mod tree_tests {
     #[test]
     fn insert_internal_nodes_preserve_invariants() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..2_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3296,7 +3304,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_internal_splits_preserves_search() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let total = 10_000u64;
 
@@ -3318,7 +3326,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_internal_splits_preserves_scan_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let total = 10_000u64;
 
@@ -3341,7 +3349,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_internal_splits_root_is_internal() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..10_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3359,7 +3367,7 @@ pub mod tree_tests {
     #[test]
     fn insert_separator_equality_routes_to_right_subtree() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in 0..2_000u64 {
             let current_key = key(&format!("{i:05}"));
@@ -3387,7 +3395,7 @@ pub mod tree_tests {
     #[test]
     fn insert_large_tree_contains_exactly_all_records() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let total = 5_000u64;
 
@@ -3410,7 +3418,7 @@ pub mod tree_tests {
     #[test]
     fn insert_large_tree_preserves_node_invariants() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3423,7 +3431,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_splits_preserve_search() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3440,7 +3448,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_splits_preserve_scan_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3461,7 +3469,7 @@ pub mod tree_tests {
     #[test]
     fn insert_multiple_splits_preserve_leaf_chain() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3534,7 +3542,7 @@ pub mod tree_tests {
     #[test]
     fn duplicate_key_is_rejected_after_multiple_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3559,7 +3567,7 @@ pub mod tree_tests {
     #[test]
     fn missing_keys_remain_absent_after_multiple_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3582,7 +3590,7 @@ pub mod tree_tests {
     #[test]
     fn root_remains_valid_after_multiple_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3609,7 +3617,7 @@ pub mod tree_tests {
     #[test]
     fn large_tree_contains_exactly_all_records() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -3628,7 +3636,7 @@ pub mod tree_tests {
     #[test]
     fn shuffled_insertions_preserve_tree_correctness() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -3668,7 +3676,7 @@ pub mod tree_tests {
     #[test]
     fn split_leaf_results_fit_page_size() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let mut keys = Vec::new();
         let mut values = Vec::new();
@@ -3732,7 +3740,7 @@ pub mod tree_tests {
     #[test]
     fn split_leaf_preserves_every_key_and_value_exactly() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..100).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -3793,7 +3801,7 @@ pub mod tree_tests {
     #[test]
     fn split_leaf_preserves_key_value_alignment() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -3839,7 +3847,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_every_child_exactly() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -3896,7 +3904,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_every_non_promoted_key() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -3950,7 +3958,7 @@ pub mod tree_tests {
     #[test]
     fn split_internal_preserves_global_key_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let keys: Vec<Key> = (0..101).map(|i| key(&format!("{i:04}"))).collect();
 
@@ -3988,22 +3996,18 @@ pub mod tree_tests {
 
         assert!(right_keys.windows(2).all(|pair| pair[0] < pair[1]));
 
-        assert!(
-            left_keys
-                .last()
-                .is_none_or(|key_value| key_value < &promoted)
-        );
+        assert!(left_keys
+            .last()
+            .is_none_or(|key_value| key_value < &promoted));
 
-        assert!(
-            right_keys
-                .first()
-                .is_none_or(|key_value| &promoted < key_value)
-        );
+        assert!(right_keys
+            .first()
+            .is_none_or(|key_value| &promoted < key_value));
     }
     #[test]
     fn split_leaf_preserves_existing_next_leaf() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let next_page_id = tree
             .store
@@ -4059,7 +4063,7 @@ pub mod tree_tests {
     #[test]
     fn duplicate_keys_are_rejected_at_all_positions_after_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -4083,7 +4087,7 @@ pub mod tree_tests {
     #[test]
     fn separator_equality_routes_to_right_leaf_after_split() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 1_000;
 
@@ -4102,7 +4106,7 @@ pub mod tree_tests {
     #[test]
     fn separator_equality_routes_correctly_after_internal_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -4124,7 +4128,7 @@ pub mod tree_tests {
     #[test]
     fn interleaved_insertions_preserve_sorted_scan() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         for i in (0..10_000).step_by(2) {
             tree.insert(fixed_key(i), record_id(i)).unwrap();
@@ -4147,7 +4151,7 @@ pub mod tree_tests {
     #[test]
     fn duplicate_insert_does_not_modify_tree_after_splits() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -4170,7 +4174,7 @@ pub mod tree_tests {
     #[test]
     fn insert_before_existing_separator_preserves_routing() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         /*
          * First insert all even keys.
@@ -4247,7 +4251,7 @@ pub mod tree_tests {
     #[test]
     fn randomized_insertion_order_preserves_tree_correctness() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 20_000;
 
@@ -4288,7 +4292,7 @@ pub mod tree_tests {
         assert_eq!(entries.len(), key_count);
 
         for (i, (actual_key, actual_record)) in entries.iter().enumerate() {
-            assert_eq!(actual_key, &fixed_key(i), "wrong key at scan position {i}",);
+            assert_eq!(actual_key, &fixed_key(i), "wrong key at scan position {i}");
 
             assert_eq!(
                 *actual_record,
@@ -4305,7 +4309,7 @@ pub mod tree_tests {
     #[test]
     fn reverse_order_insertion_preserves_tree_correctness() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -4332,7 +4336,7 @@ pub mod tree_tests {
     #[test]
     fn alternating_insertion_order_preserves_tree_correctness() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -4373,7 +4377,7 @@ pub mod tree_tests {
     #[test]
     fn randomized_insertion_duplicate_detection() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let key_count = 10_000;
 
@@ -4456,7 +4460,7 @@ pub mod tree_tests {
             fail_allocations_after: Mutex::new(None),
         };
 
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         tree.insert(fixed_key(1), record_id(1)).unwrap();
 
@@ -4715,7 +4719,7 @@ pub mod tree_tests {
             fail_allocations_after: Mutex::new(None),
         };
 
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let result = tree.insert(fixed_key(1), record_id(1));
 
@@ -4829,7 +4833,7 @@ pub mod tree_tests {
     #[test]
     fn stress_shuffled_insertions() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 50_000usize;
 
@@ -4862,7 +4866,7 @@ pub mod tree_tests {
     #[test]
     fn stress_reverse_insertions() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 30_000usize;
 
@@ -4884,7 +4888,7 @@ pub mod tree_tests {
     #[test]
     fn stress_duplicate_insertions() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 20_000usize;
 
@@ -4912,7 +4916,7 @@ pub mod tree_tests {
     #[test]
     fn stress_missing_key_searches() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 20_000usize;
 
@@ -4937,7 +4941,7 @@ pub mod tree_tests {
     #[test]
     fn stress_scan_preserves_global_order() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 40_000usize;
 
@@ -4965,7 +4969,7 @@ pub mod tree_tests {
     #[test]
     fn stress_leaf_chain_matches_scan() {
         let store = MemoryNodeStore::new();
-        let mut tree = BPlusTree::new(store).unwrap();
+        let tree = BPlusTree::new(store).unwrap();
 
         let count = 30_000usize;
 
@@ -5021,8 +5025,7 @@ pub mod tree_tests {
         use std::sync::Arc;
         use std::thread;
 
-        let mut tree =
-            BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
 
         // Insert a deterministic dataset.
         for i in 0..100 {
@@ -5059,8 +5062,7 @@ pub mod tree_tests {
         use std::sync::Arc;
         use std::thread;
 
-        let mut tree =
-            BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
 
         let key = Key::new(b"key-050".to_vec());
         let expected = RecordId::new(PageId::new(50), 50);
@@ -5085,5 +5087,57 @@ pub mod tree_tests {
         for handle in handles {
             handle.join().unwrap();
         }
+    }
+    #[test]
+    fn test_is_safe_for_insert_when_additional_bytes_fit() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        let encoded_len = node.encoded_len().unwrap();
+
+        let additional_len = PAGE_SIZE - encoded_len;
+
+        assert!(tree.is_safe_for_insert(&node, additional_len).unwrap());
+    }
+    #[test]
+    fn test_is_safe_for_insert_when_additional_bytes_do_not_fit() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        let encoded_len = node.encoded_len().unwrap();
+
+        let additional_len = PAGE_SIZE - encoded_len + 1;
+
+        assert!(!tree.is_safe_for_insert(&node, additional_len).unwrap());
+    }
+    #[test]
+    fn test_is_safe_for_insert_handles_size_overflow() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        assert!(!tree.is_safe_for_insert(&node, usize::MAX).unwrap());
+    }
+    #[test]
+    fn test_is_safe_for_insert_with_zero_additional_bytes() {
+        let tree = BPlusTree::new(MemoryNodeStore::new() /* existing constructor args */).unwrap();
+        let node = BPlusNode::Leaf {
+            keys: vec![],
+            values: vec![],
+            next_leaf: None,
+        };
+
+        assert!(tree.is_safe_for_insert(&node, 0).unwrap());
     }
 }

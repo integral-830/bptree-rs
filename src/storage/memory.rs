@@ -4,9 +4,9 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
-use crate::BPlusNode;
 use crate::node_store::NodeStore;
 use crate::page_id::PageId;
+use crate::BPlusNode;
 
 #[derive(Debug)]
 pub struct MemoryNodeStore {
@@ -311,11 +311,9 @@ pub mod memory_node_store_tests {
 
         let page_id = store.allocate_node(&original).unwrap();
 
-        assert!(
-            store
-                .write_node(PageId::new(500), &internal_node())
-                .is_err()
-        );
+        assert!(store
+            .write_node(PageId::new(500), &internal_node())
+            .is_err());
         let read_node = store.read_node(page_id).unwrap();
         let read_node = read_node.read();
 
@@ -540,7 +538,7 @@ pub mod memory_node_store_tests {
     }
     #[test]
     fn write_node_works_through_shared_store_reference() {
-        let mut store = MemoryNodeStore::new();
+        let store = MemoryNodeStore::new();
 
         let page_id = store.allocate_node(&leaf_node()).unwrap();
 
